@@ -1,0 +1,32 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging/build output
+build/
+dist/
+*.egg-info/
+
+# Local IDE and editor files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local secrets and environment configuration
+.env
+.env.*
+!.env.example
