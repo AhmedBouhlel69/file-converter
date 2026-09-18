@@ -3,7 +3,7 @@ Modern dark styling and CSS theme for Image Converter.
 """
 
 DARK_STYLESHEET = """
-QMainWindow {
+QMainWindow, QWidget#centralWidget {
     background-color: #0f1117;
     color: #f3f4f6;
     font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
@@ -251,6 +251,38 @@ QTableWidget::item {
 QTableWidget::item:selected {
     background-color: #2a3144;
 }
+
+/* In-table format dropdown */
+QComboBox#TableComboBox {
+    background-color: #1a1e2b;
+    color: #a5b4fc;
+    border: 1px solid #32384a;
+    border-radius: 5px;
+    padding: 3px 20px 3px 8px;
+    font-weight: 600;
+    font-size: 11px;
+    min-width: 82px;
+    margin: 2px;
+}
+QComboBox#TableComboBox:hover {
+    background-color: #22283a;
+    border-color: #6366f1;
+    color: #c7d2fe;
+}
+QComboBox#TableComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 18px;
+    border: none;
+}
+QComboBox#TableComboBox::down-arrow {
+    width: 0px;
+    height: 0px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 4px solid #9ca3af;
+}
+
 QHeaderView::section {
     background-color: #1c202b;
     color: #9ca3af;
@@ -312,5 +344,74 @@ QLabel#SectionTitle {
     font-size: 14px;
     font-weight: 600;
     color: #e0e7ff;
+}
+
+/* Nav Rail & Side Navigation */
+QFrame#NavRail {
+    background-color: #12141c;
+    border-right: 1px solid #232734;
+}
+
+QPushButton#NavButton {
+    background-color: transparent;
+    color: #94a3b8;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 4px 2px;
+    font-weight: 500;
+    font-size: 11px;
+    text-align: center;
+}
+QPushButton#NavButton:hover {
+    background-color: #1c202c;
+    color: #f3f4f6;
+    border-color: #282d3d;
+}
+QPushButton#NavButton:checked {
+    background-color: #232838;
+    color: #a5b4fc;
+    border: 1px solid #4f46e5;
+    font-weight: 600;
+}
+
+/* Stats Dashboard Card */
+QFrame#StatsCard {
+    background-color: #161922;
+    border: 1px solid #262b3a;
+    border-radius: 8px;
+}
+
+/* Tabs */
+QTabWidget::pane {
+    border: 1px solid #282c38;
+    background-color: #161923;
+    border-radius: 6px;
+}
+QTabBar::tab {
+    background-color: #12141c;
+    color: #94a3b8;
+    padding: 8px 16px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 2px;
+    font-weight: 500;
+}
+QTabBar::tab:hover {
+    background-color: #1c202c;
+    color: #e2e8f0;
+}
+QTabBar::tab:selected {
+    background-color: #161923;
+    color: #a5b4fc;
+    border-bottom: 2px solid #6366f1;
+    font-weight: 600;
+}
+
+/* ToolBar */
+QToolBar {
+    background-color: #141722;
+    border-bottom: 1px solid #232734;
+    padding: 4px;
+    spacing: 6px;
 }
 """

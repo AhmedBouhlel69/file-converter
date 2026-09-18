@@ -41,6 +41,57 @@ except ImportError:
     pass
 
 
+def read_csv_with_fallback(file_path: str | Path, **kwargs) -> pd.DataFrame:
+    """
+    Read a CSV file with automatic encoding detection and fallback list
+    to reliably handle UTF-8, UTF-8-SIG, CP1252, Latin-1, ISO-8859-1, and UTF-16.
+    """
+    p = Path(file_path).resolve()
+    encodings_to_try: List[str] = []
+
+    # 1. Check BOM signatures first
+    try:
+        with open(p, "rb") as f:
+            bom = f.read(4)
+        if bom.startswith(b"\xff\xfe") or bom.startswith(b"\xfe\xff"):
+            encodings_to_try.append("utf-16")
+        elif bom.startswith(b"\xef\xbb\xbf"):
+            encodings_to_try.append("utf-8-sig")
+    except Exception:
+        pass
+
+    # 2. Standard common encodings
+    encodings_to_try.extend(["utf-8", "cp1252", "latin-1", "iso-8859-1"])
+
+    # 3. Charset normalizer as auxiliary detector
+    try:
+        from charset_normalizer import from_path
+        results = from_path(p)
+        best = results.best()
+        if best and best.encoding:
+            encodings_to_try.append(best.encoding)
+    except Exception:
+        pass
+
+    encodings_to_try.append("utf-16")
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_encodings = [e for e in encodings_to_try if not (e in seen or seen.add(e))]
+
+    for enc in unique_encodings:
+        try:
+            df = pd.read_csv(str(p), encoding=enc, **kwargs)
+            if any("\x00" in str(col) for col in df.columns):
+                continue
+            return df
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+
+    # Final fallback replacing invalid characters
+    return pd.read_csv(str(p), encoding="utf-8", encoding_errors="replace", **kwargs)
+
+
 def get_csv_metadata(file_path: str | Path) -> Dict[str, Any]:
     """Extract metadata, row count, and column names from a CSV file."""
     p = Path(file_path).resolve()
@@ -53,12 +104,12 @@ def get_csv_metadata(file_path: str | Path) -> Dict[str, Any]:
     col_names: List[str] = []
 
     try:
-        df = pd.read_csv(str(p), nrows=100)
+        df = read_csv_with_fallback(p, nrows=100)
         cols = len(df.columns)
         col_names = [str(c) for c in df.columns]
 
         # Fast line count
-        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+        with open(p, "rb") as f:
             rows = max(0, sum(1 for _ in f) - 1)
     except Exception:
         pass
@@ -148,7 +199,7 @@ class DataConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        df = pd.read_csv(str(in_p))
+        df = read_csv_with_fallback(in_p)
 
         if self.has_openpyxl:
             wb = openpyxl.Workbook()
@@ -203,7 +254,7 @@ class DataConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        df = pd.read_csv(str(in_p))
+        df = read_csv_with_fallback(in_p)
         if max_rows and len(df) > max_rows:
             df = df.iloc[:max_rows]
 
@@ -220,7 +271,7 @@ class DataConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        df = pd.read_csv(str(in_p))
+        df = read_csv_with_fallback(in_p)
         df.to_json(str(out_p), orient="records", indent=indent, date_format="iso")
         return out_p
 
@@ -234,7 +285,7 @@ class DataConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        df = pd.read_csv(str(in_p))
+        df = read_csv_with_fallback(in_p)
         return self._dataframe_to_html(df, out_p, in_p.stem)
 
     def convert_csv_to_text(
@@ -248,7 +299,7 @@ class DataConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        df = pd.read_csv(str(in_p))
+        df = read_csv_with_fallback(in_p)
         df.to_csv(str(out_p), sep=delimiter, index=False)
         return out_p
 

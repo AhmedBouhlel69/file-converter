@@ -88,6 +88,12 @@ def main(argv: List[str] | None = None) -> int:
         help="Path to an input file or directory containing files to convert.",
     )
     parser.add_argument(
+        "positional_input",
+        nargs="?",
+        default=None,
+        help="Optional input file or directory path (shorthand for -i).",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         dest="output_path",
@@ -117,7 +123,26 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--no-metadata",
         action="store_true",
-        help="Strip EXIF metadata from converted images.",
+        help="Strip metadata from converted files (alias for --strip-metadata).",
+    )
+    parser.add_argument(
+        "--strip-metadata",
+        dest="strip_metadata",
+        action="store_true",
+        default=False,
+        help="Strip all personal, tracking, and device metadata (EXIF, author, GPS, timestamps) from converted files.",
+    )
+    parser.add_argument(
+        "--clean-metadata",
+        action="store_true",
+        default=False,
+        help="Directly sanitize and delete all metadata from input files without changing format.",
+    )
+    parser.add_argument(
+        "--inspect-metadata",
+        action="store_true",
+        default=False,
+        help="Inspect and display detailed metadata found in the input file.",
     )
     parser.add_argument(
         "--no-auto-orient",
@@ -164,6 +189,35 @@ def main(argv: List[str] | None = None) -> int:
         help="Specific sheet name for Excel (.xlsx) conversions.",
     )
     parser.add_argument(
+        "--password",
+        type=str,
+        default=None,
+        help="Password for encrypted PDF or Word documents.",
+    )
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="Enable OCR text extraction fallback for scanned PDFs and images.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of concurrent worker threads for batch processing (default: auto).",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable detailed debug logging to console and log file.",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Path to write execution logs.",
+    )
+    parser.add_argument(
         "-r",
         "--recursive",
         action="store_true",
@@ -184,28 +238,40 @@ def main(argv: List[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    from image_converter.core.logging_config import setup_logger, get_logger
+    from image_converter.core.ocr_engine import get_ocr_status_message
+
+    setup_logger(verbose=args.verbose, log_file=args.log_file)
+    logger = get_logger("cli")
+
     if args.list_formats:
         print("\n=== Universal File Converter Formats ===")
         print("\n[Images]")
         print("  Inputs:  .jpg, .jpeg, .png, .heic, .heif, .webp, .bmp, .tiff, .gif, .ico, .ppm, .tga, .eps")
-        print("  Outputs: JPG, PNG, WEBP, HEIC, BMP, TIFF, GIF, ICO, PDF")
+        print("  Outputs: JPG, PNG, WEBP, HEIC, BMP, TIFF, GIF, ICO, PDF, TXT (OCR), DOCX (OCR)")
         print("\n[Documents]")
         print("  Inputs:  .pdf, .docx, .doc")
-        print("  Outputs: PDF, DOCX, TXT, HTML, PNG, JPG, WEBP, CSV, XLSX")
+        print("  Outputs: PDF, DOCX, TXT, HTML, PNG, JPG, WEBP, CSV, XLSX, PPTX, ODT, RTF")
         print("\n[Spreadsheets & Data]")
         print("  Inputs:  .csv, .xlsx, .xls")
         print("  Outputs: XLSX, CSV, PDF, JSON, HTML, TXT")
+        print("\n[Presentations & Rich Documents]")
+        print("  Inputs:  .pptx, .odt, .rtf, .txt")
+        print("  Outputs: PPTX, ODT, RTF, PDF, DOCX, TXT, HTML, PNG, JPG")
+        print(f"\n[OCR Status]")
+        print(f"  {get_ocr_status_message()}")
         print("\nAll Input Extensions:")
         print("  " + ", ".join(get_supported_input_extensions()))
         print("All Output Formats:")
         print("  " + ", ".join(get_supported_output_formats()) + "\n")
         return 0
 
-    if not args.input_path:
+    input_target = args.input_path or args.positional_input
+    if not input_target:
         parser.print_help()
         return 1
 
-    in_path = Path(args.input_path)
+    in_path = Path(input_target)
     if not in_path.exists():
         print(f"Error: Input path does not exist: {in_path}", file=sys.stderr)
         return 1
@@ -217,21 +283,45 @@ def main(argv: List[str] | None = None) -> int:
 
     engine = UniversalConverterEngine()
 
+    # Metadata inspection mode
+    if getattr(args, "inspect_metadata", False):
+        from image_converter.core.metadata_engine import get_detailed_metadata
+        info = get_detailed_metadata(in_path, password=args.password)
+        print(f"\n=== Metadata Inspection: {in_path.name} ===")
+        print(f"File Size: {info['file_size']} bytes | Format: {info['extension']}")
+        print(f"Has Metadata: {'Yes' if info['has_metadata'] else 'No'} ({info['fields_count']} tag(s))")
+        if info["warnings"]:
+            for w in info["warnings"]:
+                print(f"  ⚠️ Warning: {w}")
+        if info["fields"]:
+            print("\nMetadata Fields Found:")
+            for k, v in info["fields"].items():
+                print(f"  • {k}: {v}")
+        else:
+            print("No personal or tracking metadata tags found.")
+        print()
+        return 0
+
     # Determine default target format
     target_format = args.target_format
-    if not target_format:
+    is_clean_mode = getattr(args, "clean_metadata", False)
+    strip_meta = getattr(args, "strip_metadata", False) or getattr(args, "no_metadata", False) or is_clean_mode
+
+    if is_clean_mode:
+        target_format = "STRIP_METADATA"
+    elif not target_format:
         if args.output_path and Path(args.output_path).suffix:
             ext = Path(args.output_path).suffix.lstrip(".").upper()
             target_format = "JPG" if ext == "JPEG" else ext
         else:
-            print("Error: Target format must be specified with -f/--format (e.g. -f PNG, -f PDF, -f XLSX).", file=sys.stderr)
+            print("Error: Target format must be specified with -f/--format (e.g. -f PNG, -f PDF, -f XLSX) or use --clean-metadata.", file=sys.stderr)
             return 1
 
     target_format = target_format.upper()
     if target_format == "JPEG":
         target_format = "JPG"
 
-    if not engine.is_format_supported(target_format):
+    if target_format not in ("STRIP_METADATA", "CLEAN") and not engine.is_format_supported(target_format):
         print(f"Error: Unsupported output format '{target_format}'. Available: {', '.join(get_supported_output_formats())}", file=sys.stderr)
         return 1
 
@@ -246,7 +336,8 @@ def main(argv: List[str] | None = None) -> int:
         target_format=target_format,
         quality=args.quality,
         lossless=args.lossless,
-        preserve_metadata=not args.no_metadata,
+        preserve_metadata=not strip_meta,
+        strip_metadata=strip_meta,
         auto_orient=not args.no_auto_orient,
         resize_mode=resize_mode,
         resize_percent=args.resize_percent or 100.0,
@@ -256,6 +347,9 @@ def main(argv: List[str] | None = None) -> int:
         background_color=args.bg_color,
         dpi=args.dpi,
         sheet_name=args.sheet_name,
+        password=args.password,
+        enable_ocr=args.ocr,
+        max_workers=args.workers,
     )
 
     ext = FORMAT_EXTENSIONS.get(target_format, f".{target_format.lower()}")
@@ -271,7 +365,13 @@ def main(argv: List[str] | None = None) -> int:
         # Batch or directory output
         out_dir = out_arg if out_arg else (in_path if in_path.is_dir() else in_path.parent)
         for f in files_to_process:
-            dest_name = f"{f.stem}{ext}"
+            if target_format in ("STRIP_METADATA", "CLEAN"):
+                dest_name = f"{f.stem}_clean{f.suffix}" if out_dir.resolve() == f.parent.resolve() else f"{f.name}"
+            else:
+                dest_name = f"{f.stem}{ext}"
+                if out_dir.resolve() == f.parent.resolve() and dest_name == f.name:
+                    suffix_tag = "_clean" if strip_meta else "_converted"
+                    dest_name = f"{f.stem}{suffix_tag}{ext}"
             dest_file = out_dir / dest_name
             tasks.append((f, dest_file, config))
 
@@ -298,16 +398,18 @@ def main(argv: List[str] | None = None) -> int:
     success_count = 0
     fail_count = 0
 
-    for idx, (src, dst, cfg) in enumerate(tasks, 1):
-        res: ConversionResult = engine.convert_single(src, dst, cfg)
+    def on_progress(completed: int, total: int, res: ConversionResult):
+        nonlocal success_count, fail_count
         if res.success:
             success_count += 1
             size_kb_in = res.input_size_bytes / 1024.0
             size_kb_out = res.output_size_bytes / 1024.0
-            print(f"[{idx}/{len(tasks)}] OK: {src.name} -> {Path(res.output_path).name} ({size_kb_in:.1f}KB -> {size_kb_out:.1f}KB, {res.duration_seconds*1000:.1f}ms)")
+            print(f"[{completed}/{total}] OK: {Path(res.input_path).name} -> {Path(res.output_path).name} ({size_kb_in:.1f}KB -> {size_kb_out:.1f}KB, {res.duration_seconds*1000:.1f}ms)")
         else:
             fail_count += 1
-            print(f"[{idx}/{len(tasks)}] FAILED: {src.name} - {res.error_message}", file=sys.stderr)
+            print(f"[{completed}/{total}] FAILED: {Path(res.input_path).name} - {res.error_message}", file=sys.stderr)
+
+    engine.convert_batch(tasks, progress_callback=on_progress, max_workers=args.workers)
 
     print(f"\nCompleted: {success_count} succeeded, {fail_count} failed.")
     return 0 if fail_count == 0 else 1

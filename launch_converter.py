@@ -14,6 +14,10 @@ if str(BASE_DIR) not in sys.path:
 
 
 def main():
+    if "--create-shortcut" in sys.argv or "--shortcut" in sys.argv:
+        from create_shortcut import main as shortcut_main
+        return shortcut_main()
+
     # If launched with CLI arguments (other than just --gui), route to CLI
     if len(sys.argv) > 1 and "--gui" not in sys.argv:
         from image_converter.cli import main as cli_main

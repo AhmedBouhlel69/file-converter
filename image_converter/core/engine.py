@@ -24,6 +24,24 @@ from .document_engine import (
     get_docx_metadata,
     get_pdf_metadata,
 )
+from .presentation_engine import (
+    PresentationConverter,
+    get_pptx_metadata,
+)
+from .rich_doc_engine import (
+    RichDocumentConverter,
+    get_odt_metadata,
+    get_rtf_metadata,
+)
+from .security import (
+    SecurityError,
+    validate_input_file,
+    validate_output_path,
+)
+from .ocr_engine import (
+    is_ocr_available,
+    ocr_image_to_text,
+)
 
 # Safely register HEIC/HEIF support
 _HEIF_AVAILABLE = False
@@ -51,6 +69,10 @@ SUPPORTED_INPUT_FORMATS = {
     "WORD": [".docx", ".doc"],
     "CSV": [".csv"],
     "EXCEL": [".xlsx", ".xls"],
+    "PRESENTATION": [".pptx"],
+    "ODT": [".odt"],
+    "RTF": [".rtf"],
+    "TEXT": [".txt"],
 }
 
 SUPPORTED_OUTPUT_FORMATS = [
@@ -69,6 +91,9 @@ SUPPORTED_OUTPUT_FORMATS = [
     "TXT",
     "JSON",
     "HTML",
+    "PPTX",
+    "ODT",
+    "RTF",
 ]
 
 FORMAT_EXTENSIONS: Dict[str, str] = {
@@ -89,6 +114,11 @@ FORMAT_EXTENSIONS: Dict[str, str] = {
     "TXT": ".txt",
     "JSON": ".json",
     "HTML": ".html",
+    "PPTX": ".pptx",
+    "ODT": ".odt",
+    "RTF": ".rtf",
+    "STRIP_METADATA": "",
+    "CLEAN": "",
 }
 
 # Pillow save format identifier mapping
@@ -134,7 +164,7 @@ def get_supported_output_formats() -> List[str]:
 
 def get_image_metadata(file_path: str | Path) -> Dict[str, any]:
     """
-    Read dimensions, mode, and metadata for images, PDFs, Word, CSV, or Excel files.
+    Read dimensions, mode, and metadata for images, PDFs, Word, CSV, Excel, PPTX, ODT, RTF, or TXT files.
     """
     path = Path(file_path)
     if not path.is_file():
@@ -150,6 +180,24 @@ def get_image_metadata(file_path: str | Path) -> Dict[str, any]:
         return get_csv_metadata(path)
     elif ext in (".xlsx", ".xls"):
         return get_excel_metadata(path)
+    elif ext == ".pptx":
+        return get_pptx_metadata(path)
+    elif ext == ".odt":
+        return get_odt_metadata(path)
+    elif ext == ".rtf":
+        return get_rtf_metadata(path)
+    elif ext == ".txt":
+        size = path.stat().st_size
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        return {
+            "file_name": path.name,
+            "file_path": str(path.resolve()),
+            "file_size": size,
+            "format": "TXT",
+            "lines": len(text.splitlines()),
+            "words": len(text.split()),
+            "has_alpha": False,
+        }
 
     # Standard image metadata extraction
     file_size = path.stat().st_size
@@ -202,6 +250,17 @@ class ConversionConfig:
     tiff_compression: str = "tiff_deflate"  # "none", "tiff_lzw", "tiff_deflate", "packbits"
     dpi: int = 150  # DPI for PDF page rendering
     sheet_name: Optional[str] = None  # Specific sheet for Excel conversion
+    password: Optional[str] = None  # Password for encrypted PDF/Office files
+    enable_ocr: bool = False  # Enable OCR fallback for scanned PDFs/images
+    max_workers: Optional[int] = None  # Worker threads for batch conversion
+    max_file_size: int = 500 * 1024 * 1024  # Max allowed input file size (default 500MB)
+    strip_metadata: bool = False  # Strip all personal, device, and tracking metadata
+
+    def __post_init__(self):
+        if self.strip_metadata:
+            self.preserve_metadata = False
+        elif not self.preserve_metadata:
+            self.strip_metadata = True
 
 
 @dataclass
@@ -222,12 +281,14 @@ class ConversionResult:
 
 
 class ImageConverterEngine:
-    """High-performance conversion engine supporting Images, PDF, Word, CSV, and Excel."""
+    """High-performance conversion engine supporting Images, PDF, Word, CSV, Excel, PPTX, ODT, and RTF."""
 
     def __init__(self):
         self.heif_supported = _HEIF_AVAILABLE
         self.doc_converter = DocumentConverter()
         self.data_converter = DataConverter()
+        self.pres_converter = PresentationConverter()
+        self.rich_converter = RichDocumentConverter()
 
     def is_format_supported(self, fmt: str) -> bool:
         """Check if output format is currently supported."""
@@ -301,7 +362,7 @@ class ImageConverterEngine:
     ) -> ConversionResult:
         """
         Convert a single file with specified configuration.
-        Intelligently routes between Images, PDF, Word, CSV, and Excel converters.
+        Intelligently routes between Images, PDF, Word, CSV, Excel, PPTX, ODT, and RTF converters.
         """
         t_start = time.perf_counter()
         in_p = Path(input_path).resolve()
@@ -316,13 +377,17 @@ class ImageConverterEngine:
                 error_message="Input and output paths must be different.",
             )
 
-        if not in_p.is_file():
+        # Input and output validation and security checks
+        try:
+            validate_input_file(in_p, max_size_bytes=config.max_file_size)
+            validate_output_path(out_p)
+        except Exception as sec_err:
             return ConversionResult(
                 success=False,
                 input_path=str(in_p),
                 output_path=str(out_p),
-                duration_seconds=0.0,
-                error_message=f"Input file not found: {in_p}",
+                duration_seconds=time.perf_counter() - t_start,
+                error_message=str(sec_err),
             )
 
         target_fmt_upper = config.target_format.upper()
@@ -339,6 +404,33 @@ class ImageConverterEngine:
         input_size = in_p.stat().st_size
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
+        # Direct metadata stripping / sanitation without format change
+        if (
+            target_fmt_upper in ("STRIP_METADATA", "CLEAN")
+            or (config.strip_metadata and (in_ext == out_p.suffix.lower() or target_fmt_upper == in_ext.lstrip(".").upper()))
+        ):
+            from .metadata_engine import strip_file_metadata
+            strip_res = strip_file_metadata(in_p, out_p, password=config.password)
+            if not strip_res["success"]:
+                return ConversionResult(
+                    success=False,
+                    input_path=str(in_p),
+                    output_path=str(out_p),
+                    duration_seconds=time.perf_counter() - t_start,
+                    error_message=strip_res.get("error_message") or "Failed to strip metadata",
+                )
+            out_size = out_p.stat().st_size if out_p.exists() else 0
+            return ConversionResult(
+                success=True,
+                input_path=str(in_p),
+                output_path=str(out_p),
+                input_format=in_ext.lstrip(".").upper(),
+                output_format=out_p.suffix.lstrip(".").upper(),
+                input_size_bytes=input_size,
+                output_size_bytes=out_size,
+                duration_seconds=time.perf_counter() - t_start,
+            )
+
         try:
             # -----------------------------------------------------------------
             # 1. PDF Input
@@ -351,16 +443,28 @@ class ImageConverterEngine:
                         out_p,
                         target_format=target_fmt_upper,
                         dpi=config.dpi,
+                        password=config.password,
                     )
                     final_out = files[0] if files else out_p
                 elif target_fmt_upper == "DOCX":
-                    final_out = self.doc_converter.convert_pdf_to_docx(in_p, out_p)
+                    final_out = self.doc_converter.convert_pdf_to_docx(
+                        in_p, out_p, password=config.password, enable_ocr=config.enable_ocr
+                    )
                 elif target_fmt_upper == "TXT":
-                    final_out = self.doc_converter.convert_pdf_to_text(in_p, out_p)
+                    final_out = self.doc_converter.convert_pdf_to_text(
+                        in_p, out_p, password=config.password, enable_ocr=config.enable_ocr
+                    )
                 elif target_fmt_upper in ("CSV", "XLSX"):
                     final_out = self.doc_converter.convert_pdf_to_tables(
-                        in_p, out_p, target_format=target_fmt_upper
+                        in_p, out_p, target_format=target_fmt_upper, password=config.password
                     )
+                elif target_fmt_upper == "PPTX":
+                    txt_tmp = out_p.with_suffix(".tmp.txt")
+                    self.doc_converter.convert_pdf_to_text(
+                        in_p, txt_tmp, password=config.password, enable_ocr=config.enable_ocr
+                    )
+                    final_out = self.pres_converter.convert_text_to_pptx(txt_tmp, out_p)
+                    txt_tmp.unlink(missing_ok=True)
                 else:
                     return ConversionResult(
                         success=False,
@@ -398,6 +502,18 @@ class ImageConverterEngine:
                         in_p, out_p, target_format=target_fmt_upper, dpi=config.dpi
                     )
                     final_out = files[0] if files else out_p
+                elif target_fmt_upper == "ODT":
+                    final_out = self.rich_converter.convert_docx_to_odt(in_p, out_p)
+                elif target_fmt_upper == "RTF":
+                    txt_tmp = out_p.with_suffix(".tmp.txt")
+                    self.doc_converter.convert_docx_to_text(in_p, txt_tmp)
+                    final_out = self.rich_converter.convert_text_to_rtf(txt_tmp, out_p)
+                    txt_tmp.unlink(missing_ok=True)
+                elif target_fmt_upper == "PPTX":
+                    txt_tmp = out_p.with_suffix(".tmp.txt")
+                    self.doc_converter.convert_docx_to_text(in_p, txt_tmp)
+                    final_out = self.pres_converter.convert_text_to_pptx(txt_tmp, out_p)
+                    txt_tmp.unlink(missing_ok=True)
                 else:
                     return ConversionResult(
                         success=False,
@@ -420,7 +536,175 @@ class ImageConverterEngine:
                 )
 
             # -----------------------------------------------------------------
-            # 3. CSV Input
+            # 3. Presentation Input (.pptx)
+            # -----------------------------------------------------------------
+            elif in_ext == ".pptx":
+                in_format = "PPTX"
+                if target_fmt_upper == "PDF":
+                    final_out = self.pres_converter.convert_pptx_to_pdf(in_p, out_p)
+                elif target_fmt_upper == "TXT":
+                    final_out = self.pres_converter.convert_pptx_to_text(in_p, out_p)
+                elif target_fmt_upper == "HTML":
+                    final_out = self.pres_converter.convert_pptx_to_html(in_p, out_p)
+                elif target_fmt_upper in ("PNG", "JPG", "JPEG", "WEBP"):
+                    files = self.pres_converter.convert_pptx_to_images(
+                        in_p, out_p, target_format=target_fmt_upper, dpi=config.dpi
+                    )
+                    final_out = files[0] if files else out_p
+                elif target_fmt_upper == "DOCX":
+                    txt_tmp = out_p.with_suffix(".tmp.txt")
+                    self.pres_converter.convert_pptx_to_text(in_p, txt_tmp)
+                    import docx
+                    d = docx.Document()
+                    for line in txt_tmp.read_text(encoding="utf-8").splitlines():
+                        if line.strip():
+                            d.add_paragraph(line.strip())
+                    d.save(str(out_p))
+                    txt_tmp.unlink(missing_ok=True)
+                    final_out = out_p
+                else:
+                    return ConversionResult(
+                        success=False,
+                        input_path=str(in_p),
+                        output_path=str(out_p),
+                        duration_seconds=time.perf_counter() - t_start,
+                        error_message=f"Cannot convert PowerPoint presentation to {target_fmt_upper}",
+                    )
+
+                out_size = final_out.stat().st_size if final_out.exists() else 0
+                return ConversionResult(
+                    success=True,
+                    input_path=str(in_p),
+                    output_path=str(final_out),
+                    input_format=in_format,
+                    output_format=target_fmt_upper,
+                    input_size_bytes=input_size,
+                    output_size_bytes=out_size,
+                    duration_seconds=time.perf_counter() - t_start,
+                )
+
+            # -----------------------------------------------------------------
+            # 4. OpenDocument (.odt)
+            # -----------------------------------------------------------------
+            elif in_ext == ".odt":
+                in_format = "ODT"
+                if target_fmt_upper == "PDF":
+                    final_out = self.rich_converter.convert_odt_to_pdf(in_p, out_p)
+                elif target_fmt_upper == "DOCX":
+                    final_out = self.rich_converter.convert_odt_to_docx(in_p, out_p)
+                elif target_fmt_upper == "TXT":
+                    final_out = self.rich_converter.convert_odt_to_text(in_p, out_p)
+                elif target_fmt_upper == "RTF":
+                    txt_tmp = out_p.with_suffix(".tmp.txt")
+                    self.rich_converter.convert_odt_to_text(in_p, txt_tmp)
+                    final_out = self.rich_converter.convert_text_to_rtf(txt_tmp, out_p)
+                    txt_tmp.unlink(missing_ok=True)
+                else:
+                    return ConversionResult(
+                        success=False,
+                        input_path=str(in_p),
+                        output_path=str(out_p),
+                        duration_seconds=time.perf_counter() - t_start,
+                        error_message=f"Cannot convert ODT to {target_fmt_upper}",
+                    )
+
+                out_size = final_out.stat().st_size if final_out.exists() else 0
+                return ConversionResult(
+                    success=True,
+                    input_path=str(in_p),
+                    output_path=str(final_out),
+                    input_format=in_format,
+                    output_format=target_fmt_upper,
+                    input_size_bytes=input_size,
+                    output_size_bytes=out_size,
+                    duration_seconds=time.perf_counter() - t_start,
+                )
+
+            # -----------------------------------------------------------------
+            # 5. Rich Text Format (.rtf)
+            # -----------------------------------------------------------------
+            elif in_ext == ".rtf":
+                in_format = "RTF"
+                if target_fmt_upper == "PDF":
+                    final_out = self.rich_converter.convert_rtf_to_pdf(in_p, out_p)
+                elif target_fmt_upper == "DOCX":
+                    final_out = self.rich_converter.convert_rtf_to_docx(in_p, out_p)
+                elif target_fmt_upper == "TXT":
+                    final_out = self.rich_converter.convert_rtf_to_text(in_p, out_p)
+                elif target_fmt_upper == "ODT":
+                    docx_tmp = out_p.with_suffix(".tmp.docx")
+                    self.rich_converter.convert_rtf_to_docx(in_p, docx_tmp)
+                    final_out = self.rich_converter.convert_docx_to_odt(docx_tmp, out_p)
+                    docx_tmp.unlink(missing_ok=True)
+                else:
+                    return ConversionResult(
+                        success=False,
+                        input_path=str(in_p),
+                        output_path=str(out_p),
+                        duration_seconds=time.perf_counter() - t_start,
+                        error_message=f"Cannot convert RTF to {target_fmt_upper}",
+                    )
+
+                out_size = final_out.stat().st_size if final_out.exists() else 0
+                return ConversionResult(
+                    success=True,
+                    input_path=str(in_p),
+                    output_path=str(final_out),
+                    input_format=in_format,
+                    output_format=target_fmt_upper,
+                    input_size_bytes=input_size,
+                    output_size_bytes=out_size,
+                    duration_seconds=time.perf_counter() - t_start,
+                )
+
+            # -----------------------------------------------------------------
+            # 6. Plain Text Input (.txt)
+            # -----------------------------------------------------------------
+            elif in_ext == ".txt":
+                in_format = "TXT"
+                content = in_p.read_text(encoding="utf-8", errors="ignore")
+                if target_fmt_upper == "PDF":
+                    final_out = self.rich_converter._text_to_pdf(content, out_p, title=in_p.stem)
+                elif target_fmt_upper == "DOCX":
+                    import docx
+                    d = docx.Document()
+                    for line in content.splitlines():
+                        if line.strip():
+                            d.add_paragraph(line.strip())
+                    d.save(str(out_p))
+                    final_out = out_p
+                elif target_fmt_upper == "PPTX":
+                    final_out = self.pres_converter.convert_text_to_pptx(in_p, out_p)
+                elif target_fmt_upper == "RTF":
+                    final_out = self.rich_converter.convert_text_to_rtf(in_p, out_p)
+                elif target_fmt_upper == "HTML":
+                    safe_body = html.escape(content).replace("\n", "<br>\n")
+                    html_str = f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(in_p.stem)}</title></head><body style='font-family:sans-serif;line-height:1.6;padding:20px;max-width:800px;margin:auto;'><pre>{safe_body}</pre></body></html>"
+                    out_p.write_text(html_str, encoding="utf-8")
+                    final_out = out_p
+                else:
+                    return ConversionResult(
+                        success=False,
+                        input_path=str(in_p),
+                        output_path=str(out_p),
+                        duration_seconds=time.perf_counter() - t_start,
+                        error_message=f"Cannot convert TXT to {target_fmt_upper}",
+                    )
+
+                out_size = final_out.stat().st_size if final_out.exists() else 0
+                return ConversionResult(
+                    success=True,
+                    input_path=str(in_p),
+                    output_path=str(final_out),
+                    input_format=in_format,
+                    output_format=target_fmt_upper,
+                    input_size_bytes=input_size,
+                    output_size_bytes=out_size,
+                    duration_seconds=time.perf_counter() - t_start,
+                )
+
+            # -----------------------------------------------------------------
+            # 7. CSV Input
             # -----------------------------------------------------------------
             elif in_ext == ".csv":
                 in_format = "CSV"
@@ -456,7 +740,7 @@ class ImageConverterEngine:
                 )
 
             # -----------------------------------------------------------------
-            # 4. Excel Input (.xlsx, .xls)
+            # 8. Excel Input (.xlsx, .xls)
             # -----------------------------------------------------------------
             elif in_ext in (".xlsx", ".xls"):
                 in_format = in_ext.lstrip(".").upper()
@@ -498,9 +782,37 @@ class ImageConverterEngine:
                 )
 
             # -----------------------------------------------------------------
-            # 5. Image Input (Pillow + pillow-heif)
+            # 9. Image Input (Pillow + pillow-heif or OCR)
             # -----------------------------------------------------------------
             else:
+                # Check for OCR text extraction from image to TXT or DOCX
+                if target_fmt_upper in ("TXT", "DOCX"):
+                    in_format = in_p.suffix.lstrip(".").upper()
+                    extracted_text = ocr_image_to_text(in_p)
+                    if target_fmt_upper == "TXT":
+                        out_p.write_text(extracted_text, encoding="utf-8")
+                        final_out = out_p
+                    else:
+                        import docx
+                        d = docx.Document()
+                        for line in extracted_text.splitlines():
+                            if line.strip():
+                                d.add_paragraph(line.strip())
+                        d.save(str(out_p))
+                        final_out = out_p
+
+                    out_size = final_out.stat().st_size if final_out.exists() else 0
+                    return ConversionResult(
+                        success=True,
+                        input_path=str(in_p),
+                        output_path=str(final_out),
+                        input_format=in_format,
+                        output_format=target_fmt_upper,
+                        input_size_bytes=input_size,
+                        output_size_bytes=out_size,
+                        duration_seconds=time.perf_counter() - t_start,
+                    )
+
                 if target_fmt_upper not in PILLOW_FORMAT_MAP:
                     return ConversionResult(
                         success=False,
@@ -655,24 +967,149 @@ class ImageConverterEngine:
         tasks: List[Tuple[str | Path, str | Path, ConversionConfig]],
         progress_callback: Optional[Callable[[int, int, ConversionResult], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        max_workers: Optional[int] = None,
     ) -> List[ConversionResult]:
         """
-        Process a list of conversion tasks sequentially with progress updates.
+        Process a list of conversion tasks concurrently using ThreadPoolExecutor
+        with thread-safe progress updates and mid-batch cancellation.
         """
-        results: List[ConversionResult] = []
+        import concurrent.futures
+        import threading
+
         total = len(tasks)
+        if total == 0:
+            return []
 
-        for idx, (in_path, out_path, config) in enumerate(tasks):
+        if total == 1:
+            in_path, out_path, config = tasks[0]
             if cancel_check and cancel_check():
-                break
+                return []
+            try:
+                res = self.convert_single(in_path, out_path, config)
+            except Exception as e:
+                res = ConversionResult(
+                    success=False,
+                    input_path=str(in_path),
+                    output_path=str(out_path),
+                    error_message=f"Single conversion failure: {str(e)}",
+                )
+            if progress_callback:
+                try:
+                    progress_callback(1, 1, res)
+                except Exception:
+                    pass
+            return [res]
 
-            res = self.convert_single(in_path, out_path, config)
-            results.append(res)
+        workers = max_workers
+        if workers is None:
+            for _, _, cfg in tasks:
+                if cfg.max_workers:
+                    workers = cfg.max_workers
+                    break
+        if workers is None:
+            workers = min(8, max(1, os.cpu_count() or 4))
+
+        results: List[ConversionResult] = [None] * total  # type: ignore
+        completed_count = 0
+        lock = threading.Lock()
+
+        def _worker(idx: int, task: Tuple[str | Path, str | Path, ConversionConfig]):
+            nonlocal completed_count
+            if cancel_check and cancel_check():
+                return idx, None
+
+            in_p_task, out_p_task, cfg_task = task
+            try:
+                res_item = self.convert_single(in_p_task, out_p_task, cfg_task)
+            except Exception as e:
+                res_item = ConversionResult(
+                    success=False,
+                    input_path=str(in_p_task),
+                    output_path=str(out_p_task),
+                    error_message=f"Worker exception: {str(e)}",
+                )
+
+            with lock:
+                completed_count += 1
+                current_completed = completed_count
 
             if progress_callback:
-                progress_callback(idx + 1, total, res)
+                try:
+                    progress_callback(current_completed, total, res_item)
+                except Exception:
+                    pass
 
-        return results
+            return idx, res_item
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_idx = {
+                executor.submit(_worker, idx, task): idx
+                for idx, task in enumerate(tasks)
+            }
+
+            for future in concurrent.futures.as_completed(future_to_idx):
+                if cancel_check and cancel_check():
+                    for f in future_to_idx:
+                        f.cancel()
+                    break
+                try:
+                    idx, res_item = future.result()
+                    if res_item is not None:
+                        results[idx] = res_item
+                except Exception as e:
+                    idx = future_to_idx[future]
+                    in_p_task, out_p_task, _ = tasks[idx]
+                    fail_res = ConversionResult(
+                        success=False,
+                        input_path=str(in_p_task),
+                        output_path=str(out_p_task),
+                        error_message=f"Batch execution error: {str(e)}",
+                    )
+                    results[idx] = fail_res
+                    with lock:
+                        completed_count += 1
+                        current_completed = completed_count
+                    if progress_callback:
+                        try:
+                            progress_callback(current_completed, total, fail_res)
+                        except Exception:
+                            pass
+
+        return [r for r in results if r is not None]
+
+    def strip_metadata(
+        self,
+        input_path: str | Path,
+        output_path: Optional[str | Path] = None,
+        password: Optional[str] = None,
+    ) -> ConversionResult:
+        """Strip all personal, device, and tracking metadata from a file."""
+        t_start = time.perf_counter()
+        in_p = Path(input_path).resolve()
+        if not in_p.is_file():
+            return ConversionResult(
+                success=False,
+                input_path=str(in_p),
+                output_path=str(output_path or in_p),
+                duration_seconds=0.0,
+                error_message=f"Input file not found: {in_p}",
+            )
+
+        from .metadata_engine import strip_file_metadata
+
+        res = strip_file_metadata(in_p, output_path, password=password)
+        out_p = Path(res["output_path"])
+        return ConversionResult(
+            success=res["success"],
+            input_path=str(in_p),
+            output_path=str(out_p),
+            input_format=in_p.suffix.lstrip(".").upper(),
+            output_format=out_p.suffix.lstrip(".").upper(),
+            input_size_bytes=res.get("original_size", in_p.stat().st_size),
+            output_size_bytes=res.get("sanitized_size", out_p.stat().st_size if out_p.exists() else 0),
+            duration_seconds=time.perf_counter() - t_start,
+            error_message=res.get("error_message"),
+        )
 
 
 # Export UniversalConverterEngine alias

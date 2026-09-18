@@ -50,20 +50,59 @@ except ImportError:
     pass
 
 
-def get_pdf_metadata(file_path: str | Path) -> Dict[str, Any]:
+def open_pdf_with_password(pdf_path: str | Path, password: Optional[str] = None) -> fitz.Document:
+    """Open a PDF document, authenticating with password if encrypted."""
+    p = Path(pdf_path).resolve()
+    doc = fitz.open(str(p))
+    if doc.is_encrypted:
+        if password is not None:
+            if not doc.authenticate(password):
+                doc.close()
+                raise ValueError("Incorrect password for encrypted PDF document.")
+        else:
+            doc.close()
+            raise ValueError("PDF document is encrypted / password-protected. Please provide a password.")
+    return doc
+
+
+def check_docx_encryption(file_path: str | Path) -> None:
+    """Detect if DOCX is an encrypted OLE package."""
+    p = Path(file_path).resolve()
+    try:
+        with open(p, "rb") as f:
+            header = f.read(8)
+            if header == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                f.seek(0)
+                data = f.read(4096)
+                if b"EncryptedPackage" in data or b"EncryptionInfo" in data:
+                    raise ValueError("Word document is encrypted / password-protected.")
+    except ValueError:
+        raise
+    except Exception:
+        pass
+
+
+def get_pdf_metadata(file_path: str | Path, password: Optional[str] = None) -> Dict[str, Any]:
     """Extract metadata, page count, and dimensions from a PDF document."""
     p = Path(file_path).resolve()
     if not p.is_file():
         raise FileNotFoundError(f"PDF file not found: {file_path}")
 
     doc = fitz.open(str(p))
+    is_enc = doc.is_encrypted
+    if is_enc and password:
+        doc.authenticate(password)
+
     page_count = len(doc)
     w, h = 0, 0
     if page_count > 0:
-        first_page = doc[0]
-        rect = first_page.rect
-        w = int(rect.width)
-        h = int(rect.height)
+        try:
+            first_page = doc[0]
+            rect = first_page.rect
+            w = int(rect.width)
+            h = int(rect.height)
+        except Exception:
+            pass
 
     meta = doc.metadata or {}
     file_size = p.stat().st_size
@@ -79,6 +118,7 @@ def get_pdf_metadata(file_path: str | Path) -> Dict[str, Any]:
         "format": "PDF",
         "title": meta.get("title") or "",
         "author": meta.get("author") or "",
+        "is_encrypted": is_enc,
         "has_alpha": False,
     }
 
@@ -88,6 +128,8 @@ def get_docx_metadata(file_path: str | Path) -> Dict[str, Any]:
     p = Path(file_path).resolve()
     if not p.is_file():
         raise FileNotFoundError(f"DOCX file not found: {file_path}")
+
+    check_docx_encryption(p)
 
     file_size = p.stat().st_size
     para_count = 0
@@ -142,6 +184,7 @@ class DocumentConverter:
         target_format: str = "PNG",
         dpi: int = 150,
         page_numbers: Optional[List[int]] = None,
+        password: Optional[str] = None,
     ) -> List[Path]:
         """
         Convert PDF pages to image files (PNG, JPG, WEBP, etc.).
@@ -153,7 +196,7 @@ class DocumentConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        doc = fitz.open(str(in_p))
+        doc = open_pdf_with_password(in_p, password=password)
         total_pages = len(doc)
         pages_to_render = page_numbers if page_numbers else list(range(total_pages))
         generated_files: List[Path] = []
@@ -201,16 +244,19 @@ class DocumentConverter:
         self,
         pdf_path: str | Path,
         output_path: str | Path,
+        password: Optional[str] = None,
+        enable_ocr: bool = False,
     ) -> Path:
         """
         Convert PDF to DOCX using pdf2docx with PyMuPDF/python-docx fallback.
+        Supports password authentication and OCR fallback for scanned pages.
         """
         in_p = Path(pdf_path).resolve()
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        # Primary: pdf2docx Converter
-        if self.has_pdf2docx:
+        # Primary: pdf2docx Converter (only if not encrypted or password provided)
+        if self.has_pdf2docx and not password:
             try:
                 cv = PDF2DocxConverter(str(in_p))
                 cv.convert(str(out_p))
@@ -224,7 +270,7 @@ class DocumentConverter:
         if not self.has_docx:
             raise RuntimeError("python-docx is required for PDF to DOCX conversion.")
 
-        doc = fitz.open(str(in_p))
+        doc = open_pdf_with_password(in_p, password=password)
         docx_doc = docx.Document()
 
         for page in doc:
@@ -250,6 +296,7 @@ class DocumentConverter:
 
             # Extract paragraphs / blocks
             blocks = page.get_text("blocks")
+            has_text = False
             for b in blocks:
                 text = b[4].strip()
                 if not text:
@@ -262,6 +309,18 @@ class DocumentConverter:
                 )
                 if not in_table:
                     docx_doc.add_paragraph(text)
+                    has_text = True
+
+            # If no selectable text found on page and OCR enabled, run OCR
+            if not has_text and enable_ocr:
+                try:
+                    from image_converter.core.ocr_engine import is_ocr_available, ocr_pdf_page
+                    if is_ocr_available():
+                        ocr_txt = ocr_pdf_page(page)
+                        if ocr_txt.strip():
+                            docx_doc.add_paragraph(ocr_txt.strip())
+                except Exception:
+                    pass
 
         doc.close()
         docx_doc.save(str(out_p))
@@ -271,17 +330,26 @@ class DocumentConverter:
         self,
         pdf_path: str | Path,
         output_path: str | Path,
+        password: Optional[str] = None,
+        enable_ocr: bool = False,
     ) -> Path:
-        """Extract all textual content from a PDF into a UTF-8 text file."""
+        """Extract all textual content from a PDF into a UTF-8 text file, with optional OCR fallback."""
         in_p = Path(pdf_path).resolve()
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        doc = fitz.open(str(in_p))
+        doc = open_pdf_with_password(in_p, password=password)
         full_text: List[str] = []
 
         for idx, page in enumerate(doc, 1):
             page_text = page.get_text("text").strip()
+            if not page_text and enable_ocr:
+                try:
+                    from image_converter.core.ocr_engine import is_ocr_available, ocr_pdf_page
+                    if is_ocr_available():
+                        page_text = ocr_pdf_page(page).strip()
+                except Exception:
+                    pass
             if page_text:
                 full_text.append(f"--- Page {idx} ---\n{page_text}\n")
 
@@ -294,6 +362,7 @@ class DocumentConverter:
         pdf_path: str | Path,
         output_path: str | Path,
         target_format: str = "CSV",
+        password: Optional[str] = None,
     ) -> Path:
         """Extract structured tables from PDF into CSV or XLSX format."""
         import pandas as pd
@@ -302,7 +371,7 @@ class DocumentConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        doc = fitz.open(str(in_p))
+        doc = open_pdf_with_password(in_p, password=password)
         dfs: List[pd.DataFrame] = []
 
         for page in doc:
@@ -320,7 +389,11 @@ class DocumentConverter:
 
         if not dfs:
             # Fallback: create single-column table from text lines
-            text_lines = [line.strip() for line in in_p.read_bytes().decode("utf-8", errors="ignore").splitlines() if line.strip()]
+            try:
+                raw_bytes = in_p.read_bytes()
+                text_lines = [line.strip() for line in raw_bytes.decode("utf-8", errors="ignore").splitlines() if line.strip()]
+            except Exception:
+                text_lines = []
             combined_df = pd.DataFrame({"Extracted Text": text_lines})
         elif len(dfs) == 1:
             combined_df = dfs[0]
@@ -350,6 +423,7 @@ class DocumentConverter:
         headless conversion without Microsoft Office dependencies.
         """
         in_p = Path(docx_path).resolve()
+        check_docx_encryption(in_p)
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -476,6 +550,7 @@ class DocumentConverter:
             raise RuntimeError("python-docx is required for DOCX to text conversion.")
 
         in_p = Path(docx_path).resolve()
+        check_docx_encryption(in_p)
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -507,6 +582,7 @@ class DocumentConverter:
             raise RuntimeError("python-docx is required for DOCX to HTML conversion.")
 
         in_p = Path(docx_path).resolve()
+        check_docx_encryption(in_p)
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -576,9 +652,11 @@ class DocumentConverter:
         dpi: int = 150,
     ) -> List[Path]:
         """Convert DOCX to images by rendering through PDF intermediary."""
+        in_p = Path(docx_path).resolve()
+        check_docx_encryption(in_p)
         with tempfile.TemporaryDirectory() as td:
             temp_pdf = Path(td) / "temp_render.pdf"
-            self.convert_docx_to_pdf(docx_path, temp_pdf)
+            self.convert_docx_to_pdf(in_p, temp_pdf)
             return self.convert_pdf_to_images(
                 temp_pdf,
                 output_path,

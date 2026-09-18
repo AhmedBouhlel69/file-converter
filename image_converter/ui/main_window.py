@@ -5,12 +5,14 @@ Supports Images, PDF, Word (DOCX), CSV, and Excel (XLSX).
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -23,9 +25,24 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
+
+
+def get_app_icon() -> QIcon:
+    """Load application icon with multi-location fallback."""
+    candidates = [
+        Path(__file__).resolve().parent / "assets" / "app_icon.png",
+        Path(__file__).resolve().parent / "assets" / "app_icon.ico",
+        Path(__file__).resolve().parent.parent.parent / "app_icon.png",
+        Path(__file__).resolve().parent.parent.parent / "app_icon.ico",
+    ]
+    for p in candidates:
+        if p.exists():
+            return QIcon(str(p))
+    return QIcon()
 
 from image_converter.cli import collect_convertible_files
 from image_converter.core.engine import (
@@ -40,6 +57,8 @@ from image_converter.ui.components import (
     QueueTableWidget,
     format_bytes,
 )
+from image_converter.ui.nav_rail import NavRailWidget
+from image_converter.ui.stats_widget import StatsWidget
 from image_converter.ui.theme import DARK_STYLESHEET
 from image_converter.ui.worker import BatchConversionWorker
 
@@ -50,38 +69,56 @@ class ImageConverterMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Universal File Converter (Images, PDF, Word, Excel, CSV)")
-        self.resize(1180, 780)
-        self.setMinimumSize(880, 580)
+        self.resize(1240, 800)
+        self.setMinimumSize(940, 600)
+
+        app_icon = get_app_icon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
 
         self.engine = UniversalConverterEngine()
         self.worker: Optional[BatchConversionWorker] = None
         self.last_output_dir: Optional[Path] = None
+        self._is_converting: bool = False
 
         self._init_ui()
         self.setStyleSheet(DARK_STYLESHEET)
 
     def _init_ui(self):
         central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(10)
 
-        # 1. Top Header Bar
+        # 1. Top Header Bar / Quick Actions
         top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(4, 2, 4, 4)
+
+        header_left = QHBoxLayout()
+        header_left.setSpacing(12)
+
+        app_icon = get_app_icon()
+        if not app_icon.isNull():
+            lbl_icon = QLabel()
+            lbl_icon.setPixmap(app_icon.pixmap(36, 36))
+            header_left.addWidget(lbl_icon)
 
         title_box = QVBoxLayout()
+        title_box.setSpacing(2)
         app_title = QLabel("Universal File Converter")
         app_title.setObjectName("HeaderLabel")
-        app_sub = QLabel("Convert between Images, PDF, Word (.docx), Excel (.xlsx), and CSV files")
+        app_sub = QLabel("Convert between Images, Documents, Spreadsheets, and Presentations")
         app_sub.setObjectName("MutedLabel")
         title_box.addWidget(app_title)
         title_box.addWidget(app_sub)
-        top_bar.addLayout(title_box)
+        header_left.addLayout(title_box)
 
+        top_bar.addLayout(header_left)
         top_bar.addStretch()
 
-        self.btn_add_files = QPushButton("➕ Add Files")
+        self.btn_add_files = QPushButton("➕ Add Files (Ctrl+O)")
         self.btn_add_files.setObjectName("SecondaryButton")
         self.btn_add_files.clicked.connect(self._add_files_dialog)
 
@@ -89,7 +126,7 @@ class ImageConverterMainWindow(QMainWindow):
         self.btn_add_folder.setObjectName("SecondaryButton")
         self.btn_add_folder.clicked.connect(self._add_folder_dialog)
 
-        self.btn_remove_item = QPushButton("🗑️ Remove")
+        self.btn_remove_item = QPushButton("🗑️ Remove (Del)")
         self.btn_remove_item.setObjectName("SecondaryButton")
         self.btn_remove_item.clicked.connect(self._remove_selected)
 
@@ -104,58 +141,82 @@ class ImageConverterMainWindow(QMainWindow):
 
         main_layout.addLayout(top_bar)
 
-        # 2. Main Content (Splitter: Left = DropZone + Queue Table, Right = Sidebar)
+        # 2. Main Middle Area: Nav Rail (Left) + Splitter (Center Queue / Right Inspector)
+        middle_layout = QHBoxLayout()
+        middle_layout.setContentsMargins(0, 0, 0, 0)
+        middle_layout.setSpacing(8)
+
+        # Left Nav Rail
+        self.nav_rail = NavRailWidget()
+        self.nav_rail.tab_changed.connect(self._on_nav_tab_changed)
+        middle_layout.addWidget(self.nav_rail)
+
+        # Horizontal Splitter for queue table and right panel
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left Container
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
+        # Center Container (Drop Zone + Queue Table)
+        center_widget = QWidget()
+        center_layout = QVBoxLayout(center_widget)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(8)
 
         self.drop_zone = DropZoneWidget()
         self.drop_zone.files_added.connect(self.add_images)
-        left_layout.addWidget(self.drop_zone)
+        center_layout.addWidget(self.drop_zone)
 
         self.queue_table = QueueTableWidget()
         self.queue_table.item_selected.connect(self._on_table_row_selected)
-        left_layout.addWidget(self.queue_table)
+        center_layout.addWidget(self.queue_table)
 
-        splitter.addWidget(left_widget)
+        splitter.addWidget(center_widget)
 
-        # Right Container (Sidebar with scroll)
-        sidebar_scroll = QScrollArea()
-        sidebar_scroll.setWidgetResizable(True)
-        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Right Panel: QStackedWidget hosting Settings, Preview, and Stats
+        self.right_stack = QStackedWidget()
+        self.right_stack.setMinimumWidth(350)
 
-        sidebar_widget = QWidget()
-        sidebar_layout = QVBoxLayout(sidebar_widget)
-        sidebar_layout.setContentsMargins(0, 0, 0, 0)
-        sidebar_layout.setSpacing(12)
-
-        self.preview_widget = FilePreviewWidget()
+        # Page 0: Settings Panel
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.settings_widget = ConversionSettingsWidget()
         self.settings_widget.settings_changed.connect(self._on_settings_changed)
+        settings_scroll.setWidget(self.settings_widget)
+        self.right_stack.addWidget(settings_scroll)
 
-        sidebar_layout.addWidget(self.preview_widget)
-        sidebar_layout.addWidget(self.settings_widget)
-        sidebar_layout.addStretch()
+        # Page 1: Preview & Metadata Inspector Panel
+        preview_scroll = QScrollArea()
+        preview_scroll.setWidgetResizable(True)
+        preview_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.preview_widget = FilePreviewWidget()
+        preview_scroll.setWidget(self.preview_widget)
+        self.right_stack.addWidget(preview_scroll)
 
-        sidebar_scroll.setWidget(sidebar_widget)
-        splitter.addWidget(sidebar_scroll)
+        # Page 2: Stats & Metrics Panel
+        stats_scroll = QScrollArea()
+        stats_scroll.setWidgetResizable(True)
+        stats_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        stats_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.stats_widget = StatsWidget()
+        stats_scroll.setWidget(self.stats_widget)
+        self.right_stack.addWidget(stats_scroll)
 
-        # Set splitter proportions (70% table, 30% sidebar)
-        splitter.setStretchFactor(0, 7)
-        splitter.setStretchFactor(1, 3)
+        splitter.addWidget(self.right_stack)
 
-        main_layout.addWidget(splitter)
+        # Give settings panel sufficient default width (800px queue, 400px panel)
+        splitter.setSizes([800, 400])
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+
+        middle_layout.addWidget(splitter, stretch=1)
+        main_layout.addLayout(middle_layout, stretch=1)
 
         # 3. Bottom Action & Progress Bar
         bottom_bar = QFrame()
         bottom_bar.setObjectName("CardFrame")
         bottom_layout = QHBoxLayout(bottom_bar)
-        bottom_layout.setContentsMargins(14, 10, 14, 10)
+        bottom_layout.setContentsMargins(16, 10, 16, 10)
         bottom_layout.setSpacing(14)
 
         # Status & progress
@@ -184,7 +245,7 @@ class ImageConverterMainWindow(QMainWindow):
         self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(self._cancel_conversion)
 
-        self.btn_convert_all = QPushButton("🚀 Convert All")
+        self.btn_convert_all = QPushButton("🚀 Convert All (Ctrl+Enter)")
         self.btn_convert_all.setObjectName("PrimaryButton")
         self.btn_convert_all.clicked.connect(self.start_conversion)
 
@@ -193,6 +254,29 @@ class ImageConverterMainWindow(QMainWindow):
         bottom_layout.addWidget(self.btn_convert_all)
 
         main_layout.addWidget(bottom_bar)
+
+        # Setup Keyboard Shortcuts
+        self._setup_shortcuts()
+
+    def _setup_shortcuts(self):
+        """Bind ergonomic keyboard shortcuts."""
+        shortcut_add_file = QShortcut(QKeySequence("Ctrl+O"), self)
+        shortcut_add_file.activated.connect(self._add_files_dialog)
+
+        shortcut_add_folder = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
+        shortcut_add_folder.activated.connect(self._add_folder_dialog)
+
+        shortcut_convert = QShortcut(QKeySequence("Ctrl+Return"), self)
+        shortcut_convert.activated.connect(self.start_conversion)
+
+        shortcut_delete = QShortcut(QKeySequence("Delete"), self)
+        shortcut_delete.activated.connect(self._remove_selected)
+
+        shortcut_esc = QShortcut(QKeySequence("Escape"), self)
+        shortcut_esc.activated.connect(self._cancel_conversion)
+
+    def _on_nav_tab_changed(self, index: int):
+        self.right_stack.setCurrentIndex(index)
 
     def add_images(self, file_paths: List[Path]):
         """Add files to batch queue."""
@@ -207,6 +291,7 @@ class ImageConverterMainWindow(QMainWindow):
 
         total = len(self.queue_table.file_paths)
         self.lbl_status.setText(f"Ready • {total} file(s) in queue")
+        self.drop_zone.set_collapsed(total > 0)
 
         # Automatically select the first newly added file if none selected
         if self.queue_table.currentRow() < 0 and total > 0:
@@ -219,8 +304,8 @@ class ImageConverterMainWindow(QMainWindow):
             self,
             "Select Files to Convert",
             "",
-            "All Supported Files (*.jpg *.jpeg *.png *.heic *.heif *.webp *.bmp *.tiff *.tif *.gif *.ico *.pdf *.docx *.csv *.xlsx);;"
-            "Documents (*.pdf *.docx);;"
+            "All Supported Files (*.jpg *.jpeg *.png *.heic *.heif *.webp *.bmp *.tiff *.tif *.gif *.ico *.pdf *.docx *.csv *.xlsx *.pptx *.odt *.rtf *.txt);;"
+            "Documents & Presentations (*.pdf *.docx *.pptx *.odt *.rtf *.txt);;"
             "Spreadsheets (*.csv *.xlsx);;"
             "Images (*.jpg *.jpeg *.png *.heic *.heif *.webp *.bmp *.tiff *.tif *.gif *.ico);;"
             "All Files (*.*)",
@@ -238,12 +323,14 @@ class ImageConverterMainWindow(QMainWindow):
         self.queue_table.remove_selected_row()
         total = len(self.queue_table.file_paths)
         self.lbl_status.setText(f"Ready • {total} file(s) in queue")
+        self.drop_zone.set_collapsed(total > 0)
         if total == 0:
             self.preview_widget.clear_preview()
 
     def _clear_all_items(self):
         self.queue_table.clear_all()
         self.preview_widget.clear_preview()
+        self.drop_zone.set_collapsed(False)
         self.lbl_status.setText("Ready • 0 file(s) in queue")
         self.btn_open_folder.setVisible(False)
         self.progress_bar.setVisible(False)
@@ -251,6 +338,8 @@ class ImageConverterMainWindow(QMainWindow):
 
     def _on_table_row_selected(self, file_path: str):
         self.preview_widget.set_image(file_path)
+        # Activate Preview tab in nav rail
+        self.nav_rail.set_active_tab(1)
 
     def _on_settings_changed(self):
         fmt = self.settings_widget.get_target_format()
@@ -258,6 +347,9 @@ class ImageConverterMainWindow(QMainWindow):
 
     def start_conversion(self):
         """Build conversion tasks and run background worker thread."""
+        if self._is_converting:
+            return
+
         files = self.queue_table.file_paths
         if not files:
             QMessageBox.information(
@@ -267,17 +359,26 @@ class ImageConverterMainWindow(QMainWindow):
             )
             return
 
-        config = self.settings_widget.get_config()
-        ext = FORMAT_EXTENSIONS.get(config.target_format, f".{config.target_format.lower()}")
+        base_config = self.settings_widget.get_config()
         custom_out_dir = self.settings_widget.get_output_directory()
 
         tasks = []
-        for f in files:
+        for row_idx, f in enumerate(files):
             out_dir = custom_out_dir if custom_out_dir else f.parent
-            dest_file = out_dir / f"{f.stem}{ext}"
-            if dest_file.resolve() == f.resolve():
-                dest_file = out_dir / f"{f.stem}_converted{ext}"
-            tasks.append((f, dest_file, config))
+            # Read format chosen specifically for this row from the queue table
+            row_fmt = self.queue_table.get_target_format_for_row(row_idx)
+            row_ext = FORMAT_EXTENSIONS.get(row_fmt, f".{row_fmt.lower()}")
+            row_config = dataclasses.replace(base_config, target_format=row_fmt)
+
+            if row_fmt in ("STRIP_METADATA", "CLEAN") or not row_ext:
+                target_ext = f.suffix.lower()
+                dest_file = out_dir / f"{f.stem}_clean{target_ext}"
+            else:
+                dest_file = out_dir / f"{f.stem}{row_ext}"
+                if dest_file.resolve() == f.resolve():
+                    suffix = "_clean" if row_config.strip_metadata else "_converted"
+                    dest_file = out_dir / f"{f.stem}{suffix}{row_ext}"
+            tasks.append((f, dest_file, row_config))
 
         self.last_output_dir = custom_out_dir or (files[0].parent if files else None)
 
@@ -289,6 +390,7 @@ class ImageConverterMainWindow(QMainWindow):
                 item.setText("-")
 
         # UI state: converting
+        self._is_converting = True
         self.btn_convert_all.setEnabled(False)
         self.btn_cancel.setVisible(True)
         self.btn_open_folder.setVisible(False)
@@ -331,6 +433,7 @@ class ImageConverterMainWindow(QMainWindow):
         in_bytes: int,
         out_bytes: int,
     ):
+        self._is_converting = False
         self.btn_convert_all.setEnabled(True)
         self.btn_cancel.setVisible(False)
         self.btn_open_folder.setVisible(True)
@@ -347,6 +450,16 @@ class ImageConverterMainWindow(QMainWindow):
         status_msg = f"Completed: {success_count} succeeded, {fail_count} failed in {elapsed_sec:.2f}s{saved_str}"
         self.lbl_status.setText(status_msg)
 
+        # Update metrics & switch to Stats tab
+        self.stats_widget.update_stats(
+            success_count,
+            fail_count,
+            elapsed_sec,
+            in_bytes,
+            out_bytes,
+        )
+        self.nav_rail.set_active_tab(2)
+
         QMessageBox.information(
             self,
             "Conversion Complete",
@@ -360,6 +473,7 @@ class ImageConverterMainWindow(QMainWindow):
         )
 
     def _on_batch_cancelled(self):
+        self._is_converting = False
         self.btn_convert_all.setEnabled(True)
         self.btn_cancel.setVisible(False)
         self.btn_open_folder.setVisible(False)
@@ -383,8 +497,22 @@ UniversalFileConverterMainWindow = ImageConverterMainWindow
 
 
 def launch_app():
+    # Set Windows AppUserModelID so taskbar displays our custom icon
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("UniversalFileConverter.App.1.0")
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     app.setApplicationName("Universal File Converter")
+    app.setApplicationDisplayName("Universal File Converter")
+
+    icon = get_app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+
     window = ImageConverterMainWindow()
     window.show()
     sys.exit(app.exec())

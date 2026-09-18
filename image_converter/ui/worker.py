@@ -45,21 +45,18 @@ class BatchConversionWorker(QThread):
 
     def run(self):
         total = len(self.tasks)
+        if total == 0:
+            self.batch_finished.emit(0, 0, 0.0, 0, 0)
+            return
+
         success_count = 0
         fail_count = 0
         total_in_bytes = 0
         total_out_bytes = 0
         t_start = time.perf_counter()
 
-        for idx, (in_p, out_p, config) in enumerate(self.tasks):
-            if self._is_cancelled:
-                break
-
-            in_path_obj = Path(in_p)
-            self.file_started.emit(idx, in_path_obj.name)
-
-            res = self.engine.convert_single(in_p, out_p, config)
-
+        def on_task_progress(completed_count: int, total_count: int, res: ConversionResult):
+            nonlocal success_count, fail_count, total_in_bytes, total_out_bytes
             if res.success:
                 success_count += 1
                 total_in_bytes += res.input_size_bytes
@@ -67,9 +64,32 @@ class BatchConversionWorker(QThread):
             else:
                 fail_count += 1
 
-            pct = int(((idx + 1) / total) * 100) if total > 0 else 100
-            self.file_completed.emit(idx, res)
-            self.progress_updated.emit(idx + 1, total, pct)
+            # Map to task row index
+            task_idx = 0
+            for i, (inp, _, _) in enumerate(self.tasks):
+                if str(Path(inp).resolve()) == str(Path(res.input_path).resolve()):
+                    task_idx = i
+                    break
+
+            pct = int((completed_count / total_count) * 100) if total_count > 0 else 100
+            self.file_completed.emit(task_idx, res)
+            self.progress_updated.emit(completed_count, total_count, pct)
+
+        try:
+            self.engine.convert_batch(
+                self.tasks,
+                progress_callback=on_task_progress,
+                cancel_check=lambda: self._is_cancelled,
+            )
+        except Exception as batch_err:
+            # Handle catastrophic failure gracefully
+            fail_count += (total - success_count - fail_count)
+            err_res = ConversionResult(
+                success=False,
+                input_path=str(self.tasks[0][0]) if self.tasks else "",
+                error_message=f"Batch conversion error: {str(batch_err)}",
+            )
+            self.file_completed.emit(0, err_res)
 
         t_elapsed = time.perf_counter() - t_start
         if self._is_cancelled:
