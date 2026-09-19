@@ -414,4 +414,34 @@ QToolBar {
     padding: 4px;
     spacing: 6px;
 }
+
+/* PDF Toolkit Cards & Dashboard */
+QFrame#ToolCard {
+    background-color: #181b24;
+    border: 1px solid #262b3a;
+    border-radius: 12px;
+}
+QFrame#ToolCard:hover {
+    background-color: #1f2433;
+    border: 1px solid #6366f1;
+}
+
+QPushButton#ModeTabButton {
+    background-color: #181b24;
+    color: #94a3b8;
+    border: 1px solid #282d3d;
+    border-radius: 8px;
+    padding: 8px 18px;
+    font-size: 13px;
+    font-weight: 600;
+}
+QPushButton#ModeTabButton:hover {
+    background-color: #222736;
+    color: #f1f5f9;
+}
+QPushButton#ModeTabButton:checked {
+    background-color: #4f46e5;
+    color: #ffffff;
+    border: 1px solid #6366f1;
+}
 """

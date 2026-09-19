@@ -936,7 +936,7 @@ class QueueTableWidget(QTableWidget):
         self.setColumnWidth(4, 110)
 
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.verticalHeader().setDefaultSectionSize(52)
         self.verticalHeader().setVisible(False)
         self.setShowGrid(False)
@@ -947,38 +947,91 @@ class QueueTableWidget(QTableWidget):
         self.file_paths: List[Path] = []
         self.itemSelectionChanged.connect(self._on_selection_changed)
 
+    tool_merge_requested = Signal(list)  # list of Path
+    tool_split_requested = Signal(object)  # Path
+    tool_organize_requested = Signal(object)  # Path
+    tool_compress_requested = Signal(object)  # Path
+
+    def get_selected_rows(self) -> List[int]:
+        """Return sorted list of distinct selected row indices."""
+        return sorted(list({idx.row() for idx in self.selectedIndexes()}))
+
+    def get_selected_file_paths(self) -> List[Path]:
+        """Return list of selected Path objects in row order."""
+        rows = self.get_selected_rows()
+        return [self.file_paths[r] for r in rows if 0 <= r < len(self.file_paths)]
+
     def _show_context_menu(self, pos: QPoint):
         row = self.rowAt(pos.y())
         if row < 0 or row >= len(self.file_paths):
             return
 
+        # If clicked row is not part of current selection, select it
+        selected_rows = self.get_selected_rows()
+        if row not in selected_rows:
+            self.selectRow(row)
+            selected_rows = [row]
+
+        selected_files = [self.file_paths[r] for r in selected_rows if 0 <= r < len(self.file_paths)]
         file_p = self.file_paths[row]
+        ext = file_p.suffix.lower()
+
         menu = QMenu(self)
-        
-        act_open_loc = menu.addAction("📂 Open File Location")
-        act_copy_path = menu.addAction("📋 Copy Full Path")
-        act_inspect_meta = menu.addAction("🔍 Inspect Metadata")
-        menu.addSeparator()
-        act_remove = menu.addAction("🗑️ Remove from Queue")
+
+        if len(selected_files) == 1:
+            act_open_loc = menu.addAction("📂 Open File Location")
+            act_copy_path = menu.addAction("📋 Copy Full Path")
+            act_inspect_meta = menu.addAction("🔍 Inspect Metadata")
+            menu.addSeparator()
+
+            act_split = None
+            act_org = None
+            act_comp = None
+            if ext == ".pdf":
+                act_split = menu.addAction("✂️ Split this PDF...")
+                act_org = menu.addAction("📑 Reorganize pages...")
+                act_comp = menu.addAction("🗜️ Compress this PDF...")
+                menu.addSeparator()
+
+            act_merge = menu.addAction("🔗 Merge with other files...")
+            menu.addSeparator()
+            act_remove = menu.addAction("🗑️ Remove from Queue")
+        else:
+            act_open_loc = None
+            act_copy_path = None
+            act_inspect_meta = None
+            act_split = None
+            act_org = None
+            act_comp = None
+            act_merge = menu.addAction(f"🔗 Merge {len(selected_files)} selected files to PDF...")
+            menu.addSeparator()
+            act_remove = menu.addAction(f"🗑️ Remove {len(selected_files)} selected files from Queue")
 
         chosen = menu.exec(self.viewport().mapToGlobal(pos))
-        if chosen == act_open_loc:
+        if act_open_loc and chosen == act_open_loc:
             import os
             try:
                 os.startfile(str(file_p.parent))
             except Exception:
                 pass
-        elif chosen == act_copy_path:
+        elif act_copy_path and chosen == act_copy_path:
             from PySide6.QtWidgets import QApplication
             clipboard = QApplication.clipboard()
             if clipboard:
                 clipboard.setText(str(file_p))
-        elif chosen == act_inspect_meta:
+        elif act_inspect_meta and chosen == act_inspect_meta:
             self.selectRow(row)
             self.item_selected.emit(str(file_p))
+        elif act_split and chosen == act_split:
+            self.tool_split_requested.emit(file_p)
+        elif act_org and chosen == act_org:
+            self.tool_organize_requested.emit(file_p)
+        elif act_comp and chosen == act_comp:
+            self.tool_compress_requested.emit(file_p)
+        elif chosen == act_merge:
+            self.tool_merge_requested.emit(selected_files)
         elif chosen == act_remove:
-            self.selectRow(row)
-            self.remove_selected_row()
+            self.remove_selected_rows()
 
     def _on_selection_changed(self):
         row = self.currentRow()
@@ -1153,9 +1206,21 @@ class QueueTableWidget(QTableWidget):
         self.setRowCount(0)
         self.file_paths.clear()
 
+    def remove_selected_rows(self) -> List[int]:
+        """Remove all currently selected rows in reverse order."""
+        rows = self.get_selected_rows()
+        if not rows:
+            curr = self.currentRow()
+            if 0 <= curr < len(self.file_paths):
+                rows = [curr]
+
+        for r in sorted(rows, reverse=True):
+            if 0 <= r < len(self.file_paths):
+                self.removeRow(r)
+                self.file_paths.pop(r)
+                self.item_removed.emit(r)
+        return rows
+
     def remove_selected_row(self):
-        row = self.currentRow()
-        if 0 <= row < len(self.file_paths):
-            self.removeRow(row)
-            self.file_paths.pop(row)
-            self.item_removed.emit(row)
+        """Backward-compatible removal of selected row(s)."""
+        self.remove_selected_rows()

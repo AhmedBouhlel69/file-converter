@@ -15,6 +15,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -60,6 +61,12 @@ from image_converter.ui.components import (
 from image_converter.ui.nav_rail import NavRailWidget
 from image_converter.ui.stats_widget import StatsWidget
 from image_converter.ui.theme import DARK_STYLESHEET
+from image_converter.ui.tool_dialogs import (
+    CompressDialog,
+    MergeDialog,
+    OrganizePagesDialog,
+    SplitDialog,
+)
 from image_converter.ui.worker import BatchConversionWorker
 
 
@@ -92,7 +99,7 @@ class ImageConverterMainWindow(QMainWindow):
         main_layout.setContentsMargins(14, 14, 14, 14)
         main_layout.setSpacing(10)
 
-        # 1. Top Header Bar / Quick Actions
+        # 1. Top Header Bar: App Identity
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(4, 2, 4, 4)
 
@@ -109,7 +116,7 @@ class ImageConverterMainWindow(QMainWindow):
         title_box.setSpacing(2)
         app_title = QLabel("Universal File Converter")
         app_title.setObjectName("HeaderLabel")
-        app_sub = QLabel("Convert between Images, Documents, Spreadsheets, and Presentations")
+        app_sub = QLabel("100% Local & Private • Batch Converter & Document Tools")
         app_sub.setObjectName("MutedLabel")
         title_box.addWidget(app_title)
         title_box.addWidget(app_sub)
@@ -118,11 +125,18 @@ class ImageConverterMainWindow(QMainWindow):
         top_bar.addLayout(header_left)
         top_bar.addStretch()
 
+        main_layout.addLayout(top_bar)
+
+        # 2. Quick Actions Bar (Batch queue actions + Document Tools)
+        conv_top_bar = QHBoxLayout()
+        conv_top_bar.setContentsMargins(0, 0, 0, 0)
+        conv_top_bar.setSpacing(8)
+
         self.btn_add_files = QPushButton("➕ Add Files (Ctrl+O)")
         self.btn_add_files.setObjectName("SecondaryButton")
         self.btn_add_files.clicked.connect(self._add_files_dialog)
 
-        self.btn_add_folder = QPushButton("📁 Add Folder")
+        self.btn_add_folder = QPushButton("📁 Add Folder (Ctrl+Shift+O)")
         self.btn_add_folder.setObjectName("SecondaryButton")
         self.btn_add_folder.clicked.connect(self._add_folder_dialog)
 
@@ -134,14 +148,43 @@ class ImageConverterMainWindow(QMainWindow):
         self.btn_clear_all.setObjectName("DangerButton")
         self.btn_clear_all.clicked.connect(self._clear_all_items)
 
-        top_bar.addWidget(self.btn_add_files)
-        top_bar.addWidget(self.btn_add_folder)
-        top_bar.addWidget(self.btn_remove_item)
-        top_bar.addWidget(self.btn_clear_all)
+        conv_top_bar.addWidget(self.btn_add_files)
+        conv_top_bar.addWidget(self.btn_add_folder)
+        conv_top_bar.addWidget(self.btn_remove_item)
+        conv_top_bar.addWidget(self.btn_clear_all)
 
-        main_layout.addLayout(top_bar)
+        # Separator line
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet("color: #363b4d; margin: 2px 4px;")
+        conv_top_bar.addWidget(sep)
 
-        # 2. Main Middle Area: Nav Rail (Left) + Splitter (Center Queue / Right Inspector)
+        # 4 Core Document Tools
+        self.btn_tool_merge = QPushButton("Merge to PDF...")
+        self.btn_tool_merge.setObjectName("SecondaryButton")
+        self.btn_tool_merge.clicked.connect(self._open_merge_dialog)
+
+        self.btn_tool_split = QPushButton("Split PDF...")
+        self.btn_tool_split.setObjectName("SecondaryButton")
+        self.btn_tool_split.clicked.connect(self._open_split_dialog)
+
+        self.btn_tool_organize = QPushButton("Organize Pages...")
+        self.btn_tool_organize.setObjectName("SecondaryButton")
+        self.btn_tool_organize.clicked.connect(self._open_organize_dialog)
+
+        self.btn_tool_compress = QPushButton("Compress PDF...")
+        self.btn_tool_compress.setObjectName("SecondaryButton")
+        self.btn_tool_compress.clicked.connect(self._open_compress_dialog)
+
+        conv_top_bar.addWidget(self.btn_tool_merge)
+        conv_top_bar.addWidget(self.btn_tool_split)
+        conv_top_bar.addWidget(self.btn_tool_organize)
+        conv_top_bar.addWidget(self.btn_tool_compress)
+        conv_top_bar.addStretch()
+
+        main_layout.addLayout(conv_top_bar)
+
+        # 3. Middle Area: Nav Rail (Left) + Splitter (Center Queue / Right Inspector)
         middle_layout = QHBoxLayout()
         middle_layout.setContentsMargins(0, 0, 0, 0)
         middle_layout.setSpacing(8)
@@ -166,6 +209,10 @@ class ImageConverterMainWindow(QMainWindow):
 
         self.queue_table = QueueTableWidget()
         self.queue_table.item_selected.connect(self._on_table_row_selected)
+        self.queue_table.tool_merge_requested.connect(self._open_merge_dialog_with_files)
+        self.queue_table.tool_split_requested.connect(self._open_split_dialog_with_file)
+        self.queue_table.tool_organize_requested.connect(self._open_organize_dialog_with_file)
+        self.queue_table.tool_compress_requested.connect(self._open_compress_dialog_with_file)
         center_layout.addWidget(self.queue_table)
 
         splitter.addWidget(center_widget)
@@ -204,7 +251,6 @@ class ImageConverterMainWindow(QMainWindow):
 
         splitter.addWidget(self.right_stack)
 
-        # Give settings panel sufficient default width (800px queue, 400px panel)
         splitter.setSizes([800, 400])
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
@@ -212,14 +258,13 @@ class ImageConverterMainWindow(QMainWindow):
         middle_layout.addWidget(splitter, stretch=1)
         main_layout.addLayout(middle_layout, stretch=1)
 
-        # 3. Bottom Action & Progress Bar
+        # 4. Bottom Action & Progress Bar for Batch Converter
         bottom_bar = QFrame()
         bottom_bar.setObjectName("CardFrame")
         bottom_layout = QHBoxLayout(bottom_bar)
         bottom_layout.setContentsMargins(16, 10, 16, 10)
         bottom_layout.setSpacing(14)
 
-        # Status & progress
         stat_box = QVBoxLayout()
         stat_box.setSpacing(4)
 
@@ -234,7 +279,6 @@ class ImageConverterMainWindow(QMainWindow):
         stat_box.addWidget(self.progress_bar)
         bottom_layout.addLayout(stat_box, stretch=1)
 
-        # Buttons
         self.btn_open_folder = QPushButton("📂 Open Output Folder")
         self.btn_open_folder.setObjectName("SuccessButton")
         self.btn_open_folder.setVisible(False)
@@ -257,6 +301,62 @@ class ImageConverterMainWindow(QMainWindow):
 
         # Setup Keyboard Shortcuts
         self._setup_shortcuts()
+
+    def _open_merge_dialog(self):
+        selected_paths = self._get_selected_or_all_paths()
+        dlg = MergeDialog(initial_files=selected_paths, parent=self)
+        dlg.exec()
+
+    def _open_merge_dialog_with_files(self, paths: List[Path]):
+        dlg = MergeDialog(initial_files=paths, parent=self)
+        dlg.exec()
+
+    def _open_split_dialog(self):
+        pdf_path = self._get_selected_pdf_path()
+        dlg = SplitDialog(initial_file=pdf_path, parent=self)
+        dlg.exec()
+
+    def _open_split_dialog_with_file(self, path: Path):
+        dlg = SplitDialog(initial_file=path, parent=self)
+        dlg.exec()
+
+    def _open_organize_dialog(self):
+        pdf_path = self._get_selected_pdf_path()
+        dlg = OrganizePagesDialog(initial_file=pdf_path, parent=self)
+        dlg.exec()
+
+    def _open_organize_dialog_with_file(self, path: Path):
+        dlg = OrganizePagesDialog(initial_file=path, parent=self)
+        dlg.exec()
+
+    def _open_compress_dialog(self):
+        pdf_path = self._get_selected_pdf_path()
+        dlg = CompressDialog(initial_file=pdf_path, parent=self)
+        dlg.exec()
+
+    def _open_compress_dialog_with_file(self, path: Path):
+        dlg = CompressDialog(initial_file=path, parent=self)
+        dlg.exec()
+
+    def _get_selected_or_all_paths(self) -> List[Path]:
+        selected = self.queue_table.get_selected_file_paths()
+        if selected:
+            return selected
+        return list(self.queue_table.file_paths)
+
+    def _get_selected_pdf_path(self) -> Optional[Path]:
+        for p in self.queue_table.get_selected_file_paths():
+            if p.suffix.lower() == ".pdf":
+                return p
+        row = self.queue_table.currentRow()
+        if 0 <= row < len(self.queue_table.file_paths):
+            p = self.queue_table.file_paths[row]
+            if p.suffix.lower() == ".pdf":
+                return p
+        for p in self.queue_table.file_paths:
+            if p.suffix.lower() == ".pdf":
+                return p
+        return None
 
     def _setup_shortcuts(self):
         """Bind ergonomic keyboard shortcuts."""
@@ -320,7 +420,7 @@ class ImageConverterMainWindow(QMainWindow):
             self.add_images(paths)
 
     def _remove_selected(self):
-        self.queue_table.remove_selected_row()
+        self.queue_table.remove_selected_rows()
         total = len(self.queue_table.file_paths)
         self.lbl_status.setText(f"Ready • {total} file(s) in queue")
         self.drop_zone.set_collapsed(total > 0)

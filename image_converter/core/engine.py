@@ -14,33 +14,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageOps
 
-from .data_engine import (
-    DataConverter,
-    get_csv_metadata,
-    get_excel_metadata,
-)
-from .document_engine import (
-    DocumentConverter,
-    get_docx_metadata,
-    get_pdf_metadata,
-)
-from .presentation_engine import (
-    PresentationConverter,
-    get_pptx_metadata,
-)
-from .rich_doc_engine import (
-    RichDocumentConverter,
-    get_odt_metadata,
-    get_rtf_metadata,
-)
 from .security import (
     SecurityError,
     validate_input_file,
     validate_output_path,
-)
-from .ocr_engine import (
-    is_ocr_available,
-    ocr_image_to_text,
 )
 
 # Safely register HEIC/HEIF support
@@ -173,18 +150,25 @@ def get_image_metadata(file_path: str | Path) -> Dict[str, any]:
     ext = path.suffix.lower()
 
     if ext == ".pdf":
+        from .document_engine import get_pdf_metadata
         return get_pdf_metadata(path)
     elif ext in (".docx", ".doc"):
+        from .document_engine import get_docx_metadata
         return get_docx_metadata(path)
     elif ext == ".csv":
+        from .data_engine import get_csv_metadata
         return get_csv_metadata(path)
     elif ext in (".xlsx", ".xls"):
+        from .data_engine import get_excel_metadata
         return get_excel_metadata(path)
     elif ext == ".pptx":
+        from .presentation_engine import get_pptx_metadata
         return get_pptx_metadata(path)
     elif ext == ".odt":
+        from .rich_doc_engine import get_odt_metadata
         return get_odt_metadata(path)
     elif ext == ".rtf":
+        from .rich_doc_engine import get_rtf_metadata
         return get_rtf_metadata(path)
     elif ext == ".txt":
         size = path.stat().st_size
@@ -285,10 +269,38 @@ class ImageConverterEngine:
 
     def __init__(self):
         self.heif_supported = _HEIF_AVAILABLE
-        self.doc_converter = DocumentConverter()
-        self.data_converter = DataConverter()
-        self.pres_converter = PresentationConverter()
-        self.rich_converter = RichDocumentConverter()
+        self._doc_converter = None
+        self._data_converter = None
+        self._pres_converter = None
+        self._rich_converter = None
+
+    @property
+    def doc_converter(self):
+        if self._doc_converter is None:
+            from .document_engine import DocumentConverter
+            self._doc_converter = DocumentConverter()
+        return self._doc_converter
+
+    @property
+    def data_converter(self):
+        if self._data_converter is None:
+            from .data_engine import DataConverter
+            self._data_converter = DataConverter()
+        return self._data_converter
+
+    @property
+    def pres_converter(self):
+        if self._pres_converter is None:
+            from .presentation_engine import PresentationConverter
+            self._pres_converter = PresentationConverter()
+        return self._pres_converter
+
+    @property
+    def rich_converter(self):
+        if self._rich_converter is None:
+            from .rich_doc_engine import RichDocumentConverter
+            self._rich_converter = RichDocumentConverter()
+        return self._rich_converter
 
     def is_format_supported(self, fmt: str) -> bool:
         """Check if output format is currently supported."""
@@ -788,6 +800,7 @@ class ImageConverterEngine:
                 # Check for OCR text extraction from image to TXT or DOCX
                 if target_fmt_upper in ("TXT", "DOCX"):
                     in_format = in_p.suffix.lstrip(".").upper()
+                    from .ocr_engine import ocr_image_to_text
                     extracted_text = ocr_image_to_text(in_p)
                     if target_fmt_upper == "TXT":
                         out_p.write_text(extracted_text, encoding="utf-8")
