@@ -233,8 +233,9 @@ def main(argv: List[str] | None = None) -> int:
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger("cli").warning(f"Failed to reconfigure stdout/stderr encoding: {e}", exc_info=True)
 
     args = parser.parse_args(argv)
 
@@ -404,7 +405,8 @@ def main(argv: List[str] | None = None) -> int:
             success_count += 1
             size_kb_in = res.input_size_bytes / 1024.0
             size_kb_out = res.output_size_bytes / 1024.0
-            print(f"[{completed}/{total}] OK: {Path(res.input_path).name} -> {Path(res.output_path).name} ({size_kb_in:.1f}KB -> {size_kb_out:.1f}KB, {res.duration_seconds*1000:.1f}ms)")
+            warn_suffix = f" [WARNING: {res.error_message}]" if res.error_message else ""
+            print(f"[{completed}/{total}] OK: {Path(res.input_path).name} -> {Path(res.output_path).name} ({size_kb_in:.1f}KB -> {size_kb_out:.1f}KB, {res.duration_seconds*1000:.1f}ms){warn_suffix}")
         else:
             fail_count += 1
             print(f"[{completed}/{total}] FAILED: {Path(res.input_path).name} - {res.error_message}", file=sys.stderr)

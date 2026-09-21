@@ -788,15 +788,26 @@ class CompressDialog(QDialog):
             comp_s = format_bytes(stats["compressed_size"])
             pct = stats["savings_percent"]
 
-            msg = f"Original: {orig_s} → Compressed: {comp_s} ({pct:.1f}% space saved)"
-            self.lbl_result.setText(f"✅ {msg}")
-
-            reply = QMessageBox.information(
-                self,
-                "Compression Complete",
-                f"{msg}\n\nSaved to:\n{out_f}\n\nOpen output folder?",
-                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
-            )
+            if stats.get("path_taken") == "fallback-copy" or stats.get("saved_bytes", 0) <= 0:
+                msg = f"No reduction was achieved (original was already optimal at {orig_s}). Original file preserved."
+                self.lbl_result.setText(f"ℹ️ {msg}")
+                self.lbl_result.setStyleSheet("color: #94a3b8; font-weight: 600; font-size: 13px;")
+                reply = QMessageBox.information(
+                    self,
+                    "No Reduction Achieved",
+                    f"{msg}\n\nCopied to:\n{out_f}\n\nOpen output folder?",
+                    QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
+                )
+            else:
+                msg = f"Original: {orig_s} → Compressed: {comp_s} ({pct:.1f}% space saved)"
+                self.lbl_result.setText(f"✅ {msg}")
+                self.lbl_result.setStyleSheet("color: #34d399; font-weight: 600; font-size: 13px;")
+                reply = QMessageBox.information(
+                    self,
+                    "Compression Complete",
+                    f"{msg}\n\nSaved to:\n{out_f}\n\nOpen output folder?",
+                    QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
+                )
             if reply == QMessageBox.StandardButton.Open:
                 os.startfile(str(Path(out_f).parent))
             self.accept()

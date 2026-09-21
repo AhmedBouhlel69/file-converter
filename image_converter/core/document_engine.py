@@ -6,14 +6,18 @@ Supports converting between PDF, Word, Images, Plain Text, HTML, CSV, and XLSX.
 from __future__ import annotations
 
 import html
+import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 # Check optional pdf2docx
 _PDF2DOCX_AVAILABLE = False
@@ -78,8 +82,8 @@ def check_docx_encryption(file_path: str | Path) -> None:
                     raise ValueError("Word document is encrypted / password-protected.")
     except ValueError:
         raise
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error checking Word document encryption for {p.name}: {e}", exc_info=True)
 
 
 def get_pdf_metadata(file_path: str | Path, password: Optional[str] = None) -> Dict[str, Any]:
@@ -101,8 +105,8 @@ def get_pdf_metadata(file_path: str | Path, password: Optional[str] = None) -> D
             rect = first_page.rect
             w = int(rect.width)
             h = int(rect.height)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error reading page dimensions for PDF {p.name}: {e}", exc_info=True)
 
     meta = doc.metadata or {}
     file_size = p.stat().st_size
@@ -147,8 +151,8 @@ def get_docx_metadata(file_path: str | Path) -> Dict[str, Any]:
                 for row in tbl.rows:
                     for cell in row.cells:
                         word_count += len(cell.text.split())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error reading DOCX structure for {p.name}: {e}", exc_info=True)
 
     return {
         "file_name": p.name,
@@ -248,14 +252,14 @@ class DocumentConverter:
         enable_ocr: bool = False,
     ) -> Path:
         """
-        Convert PDF to DOCX using pdf2docx with PyMuPDF/python-docx fallback.
-        Supports password authentication and OCR fallback for scanned pages.
+        Convert PDF to DOCX using pdf2docx or native MS Word COM for layout fidelity.
+        Fails if native conversion is unavailable instead of making a fake text-only document.
         """
         in_p = Path(pdf_path).resolve()
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        # Primary: pdf2docx Converter (only if not encrypted or password provided)
+        # Primary: pdf2docx Converter
         if self.has_pdf2docx and not password:
             try:
                 cv = PDF2DocxConverter(str(in_p))
@@ -263,68 +267,63 @@ class DocumentConverter:
                 cv.close()
                 if out_p.is_file() and out_p.stat().st_size > 0:
                     return out_p
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"pdf2docx conversion failed for {in_p.name}: {e}", exc_info=True)
 
-        # Fallback: extract text & tables using PyMuPDF and assemble docx
-        if not self.has_docx:
-            raise RuntimeError("python-docx is required for PDF to DOCX conversion.")
-
-        doc = open_pdf_with_password(in_p, password=password)
-        docx_doc = docx.Document()
-
-        for page in doc:
-            # Extract tables first if available
-            table_rects = []
-            if hasattr(page, "find_tables"):
+        # Fallback: MS Word COM (Word can open PDF and convert to DOCX natively)
+        if sys.platform == "win32":
+            from image_converter.core.com_utils import (
+                com_initialized,
+                WD_ALERTS_NONE,
+                MSO_AUTOMATION_SECURITY_FORCE_DISABLE,
+                WD_FORMAT_DOCX,
+            )
+            with com_initialized():
+                import win32com.client
                 try:
-                    tabs = page.find_tables()
-                    for tab in tabs:
-                        df = tab.to_pandas()
-                        if not df.empty:
-                            table_rects.append(tab.bbox)
-                            t = docx_doc.add_table(rows=len(df) + 1, cols=len(df.columns))
-                            t.style = "Table Grid"
-                            for col_idx, col_name in enumerate(df.columns):
-                                t.cell(0, col_idx).text = str(col_name)
-                            for row_idx, row in df.iterrows():
-                                for col_idx, val in enumerate(row):
-                                    t.cell(row_idx + 1, col_idx).text = "" if str(val) == "nan" else str(val)
-                            docx_doc.add_paragraph()
-                except Exception:
-                    pass
+                    word = win32com.client.DispatchEx("Word.Application")
+                except Exception as dispatch_err:
+                    logger.warning(f"Word COM not available: {dispatch_err}")
+                    word = None
 
-            # Extract paragraphs / blocks
-            blocks = page.get_text("blocks")
-            has_text = False
-            for b in blocks:
-                text = b[4].strip()
-                if not text:
-                    continue
-                # Skip if inside an extracted table
-                bx0, by0, bx1, by1 = b[0], b[1], b[2], b[3]
-                in_table = any(
-                    bx0 >= tx0 and by0 >= ty0 and bx1 <= tx1 and by1 <= ty1
-                    for (tx0, ty0, tx1, ty1) in table_rects
-                )
-                if not in_table:
-                    docx_doc.add_paragraph(text)
-                    has_text = True
+                if word is not None:
+                    try:
+                        word.Visible = False
+                        word.DisplayAlerts = WD_ALERTS_NONE
+                        word.AutomationSecurity = MSO_AUTOMATION_SECURITY_FORCE_DISABLE
+                        doc = None
+                        tmp_out = out_p.with_name(f"{out_p.stem}_tmp_{os.getpid()}_{time.time_ns()}.docx")
+                        try:
+                            try:
+                                # Open PDF in Word (performs native PDF reflow conversion)
+                                doc = word.Documents.Open(str(in_p), ReadOnly=True, ConfirmConversions=False)
+                                doc.SaveAs(str(tmp_out), FileFormat=WD_FORMAT_DOCX)
+                            finally:
+                                if doc is not None:
+                                    try:
+                                        doc.Close(False)
+                                    except Exception as close_err:
+                                        logger.warning(f"Error closing Word document: {close_err}")
+                            if tmp_out.is_file() and tmp_out.stat().st_size > 0:
+                                os.replace(tmp_out, out_p)
+                        finally:
+                            if tmp_out.exists():
+                                try:
+                                    tmp_out.unlink()
+                                except Exception as unlink_err:
+                                    logger.warning(f"Could not remove temporary file {tmp_out}: {unlink_err}")
+                    except Exception as e:
+                        logger.warning(f"MS Word COM PDF-to-DOCX conversion failed for {in_p.name}: {e}", exc_info=True)
+                        raise RuntimeError(f"Microsoft Word PDF-to-DOCX conversion failed for '{in_p.name}': {e}") from e
+                    finally:
+                        try:
+                            word.Quit()
+                        except Exception as quit_err:
+                            logger.warning(f"Error quitting Word application: {quit_err}")
+                    if out_p.is_file() and out_p.stat().st_size > 0:
+                        return out_p
 
-            # If no selectable text found on page and OCR enabled, run OCR
-            if not has_text and enable_ocr:
-                try:
-                    from image_converter.core.ocr_engine import is_ocr_available, ocr_pdf_page
-                    if is_ocr_available():
-                        ocr_txt = ocr_pdf_page(page)
-                        if ocr_txt.strip():
-                            docx_doc.add_paragraph(ocr_txt.strip())
-                except Exception:
-                    pass
-
-        doc.close()
-        docx_doc.save(str(out_p))
-        return out_p
+        raise RuntimeError("True PDF to DOCX conversion failed. Ensure 'pdf2docx' is installed or Microsoft Word is available.")
 
     def convert_pdf_to_text(
         self,
@@ -348,8 +347,8 @@ class DocumentConverter:
                     from image_converter.core.ocr_engine import is_ocr_available, ocr_pdf_page
                     if is_ocr_available():
                         page_text = ocr_pdf_page(page).strip()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"OCR failed on page {idx} of {in_p.name}: {e}", exc_info=True)
             if page_text:
                 full_text.append(f"--- Page {idx} ---\n{page_text}\n")
 
@@ -371,39 +370,206 @@ class DocumentConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
+        self.last_table_warning: Optional[str] = None
         doc = open_pdf_with_password(in_p, password=password)
-        dfs: List[pd.DataFrame] = []
+        total_pages = len(doc)
+        raw_tables: List[pd.DataFrame] = []
+        page_errors: List[Tuple[int, str]] = []
 
-        for page in doc:
+        for page_idx, page in enumerate(doc, 1):
             if hasattr(page, "find_tables"):
                 try:
                     tabs = page.find_tables()
                     for tab in tabs:
+                        raw_rows = tab.extract()
+                        if not raw_rows or not any(any(c for c in r) for r in raw_rows):
+                            continue
                         df = tab.to_pandas()
                         if not df.empty:
-                            dfs.append(df)
-                except Exception:
-                    pass
+                            df.attrs["raw_rows"] = raw_rows
+                            df.attrs["page_idx"] = page_idx
+                            df.attrs["bbox"] = tab.bbox
+                            if tab.rows and hasattr(tab.rows[0], "cells"):
+                                df.attrs["col_x_boundaries"] = [(cell[0], cell[2]) for cell in tab.rows[0].cells]
+                            else:
+                                df.attrs["col_x_boundaries"] = None
+                            raw_tables.append(df)
+                except Exception as e:
+                    logger.warning(
+                        f"Table extraction failed on page {page_idx} of '{in_p.name}': {e}, skipping this page.",
+                        exc_info=True,
+                    )
+                    page_errors.append((page_idx, str(e)))
+                    continue
 
         doc.close()
 
-        if not dfs:
-            # Fallback: create single-column table from text lines
-            try:
-                raw_bytes = in_p.read_bytes()
-                text_lines = [line.strip() for line in raw_bytes.decode("utf-8", errors="ignore").splitlines() if line.strip()]
-            except Exception:
-                text_lines = []
-            combined_df = pd.DataFrame({"Extracted Text": text_lines})
-        elif len(dfs) == 1:
-            combined_df = dfs[0]
-        else:
-            combined_df = pd.concat(dfs, ignore_index=True)
+        if not raw_tables:
+            if page_errors:
+                err_details = "; ".join(f"page {p}: {err}" for p, err in page_errors)
+                raise RuntimeError(f"Table extraction failed across document '{in_p.name}': {err_details}")
+            raise ValueError(f"No structured tables found in PDF '{in_p.name}' to extract.")
 
-        if target_format.upper() in ("XLSX", "EXCEL"):
-            combined_df.to_excel(str(out_p), index=False)
+        if page_errors:
+            extracted_pages = sorted(set(df.attrs.get("page_idx") for df in raw_tables))
+            failed_pages = sorted(set(p for p, _ in page_errors))
+            self.last_table_warning = (
+                f"extracted {len(extracted_pages)} of {total_pages} pages; "
+                f"page(s) {', '.join(str(p) for p in failed_pages)} failed"
+            )
         else:
-            combined_df.to_csv(str(out_p), index=False, encoding="utf-8-sig")
+            self.last_table_warning = None
+
+        def _norm_headers(cols):
+            return [str(c).strip().lower() for c in cols]
+
+        def _geom_matches(geom1, geom2, tol=5.0):
+            if not geom1 or not geom2:
+                return False
+            if len(geom1) != len(geom2):
+                return False
+            return all(abs(g1[0] - g2[0]) <= tol and abs(g1[1] - g2[1]) <= tol for g1, g2 in zip(geom1, geom2))
+
+        table_groups: List[pd.DataFrame] = []
+        current_group: Optional[pd.DataFrame] = None
+
+        for df in raw_tables:
+            if df.empty:
+                continue
+
+            if current_group is None:
+                current_group = df.copy()
+                current_group.attrs["last_page_idx"] = df.attrs.get("page_idx")
+                current_group.attrs["col_x_boundaries"] = df.attrs.get("col_x_boundaries")
+                continue
+
+            is_next_page = (df.attrs.get("page_idx") == current_group.attrs.get("last_page_idx", 0) + 1)
+            same_col_count = (len(df.columns) == len(current_group.columns))
+            geom_matches = _geom_matches(current_group.attrs.get("col_x_boundaries"), df.attrs.get("col_x_boundaries"))
+
+            curr_cols = [str(c).strip() for c in current_group.columns]
+            row0_vals = [str(v).strip() for v in df.iloc[0].values] if len(df) > 0 else []
+
+            # Case 1: Repeated header as first row of continuation table
+            if same_col_count and is_next_page and geom_matches and (curr_cols == row0_vals or _norm_headers(curr_cols) == _norm_headers(row0_vals)):
+                df_clean = df.iloc[1:].copy()
+                df_clean.columns = current_group.columns
+                current_group = pd.concat([current_group, df_clean], ignore_index=True)
+                current_group.attrs["last_page_idx"] = df.attrs.get("page_idx")
+
+            # Case 2: Matching column headers (pure continuation)
+            elif same_col_count and is_next_page and geom_matches and _norm_headers(current_group.columns) == _norm_headers(df.columns):
+                df_clean = df.copy()
+                df_clean.columns = current_group.columns
+                current_group = pd.concat([current_group, df_clean], ignore_index=True)
+                current_group.attrs["last_page_idx"] = df.attrs.get("page_idx")
+
+            # Case 3: Headerless continuation (different header text promoted from data, but geometry & continuity match)
+            elif same_col_count and is_next_page and geom_matches:
+                raw_rows = df.attrs.get("raw_rows")
+                if raw_rows and len(raw_rows) > 0:
+                    df_reconstructed = pd.DataFrame(raw_rows, columns=current_group.columns)
+                else:
+                    full_data = [list(df.columns)] + df.values.tolist()
+                    df_reconstructed = pd.DataFrame(full_data, columns=current_group.columns)
+                current_group = pd.concat([current_group, df_reconstructed], ignore_index=True)
+                current_group.attrs["last_page_idx"] = df.attrs.get("page_idx")
+
+            else:
+                # Criteria not met -> keep separate and log a warning
+                logger.warning(
+                    f"Table on page {df.attrs.get('page_idx')} was kept separate from previous table: "
+                    f"same_col_count={same_col_count}, is_next_page={is_next_page}, geom_matches={geom_matches}."
+                )
+                table_groups.append(current_group)
+                current_group = df.copy()
+                current_group.attrs["last_page_idx"] = df.attrs.get("page_idx")
+                current_group.attrs["col_x_boundaries"] = df.attrs.get("col_x_boundaries")
+
+        if current_group is not None:
+            table_groups.append(current_group)
+
+        is_xlsx = target_format.upper() in ("XLSX", "EXCEL")
+
+        if is_xlsx:
+            if len(table_groups) == 1:
+                table_groups[0].to_excel(str(out_p), index=False, sheet_name="Table_1")
+            else:
+                with pd.ExcelWriter(str(out_p), engine="openpyxl") as writer:
+                    for idx, grp_df in enumerate(table_groups, 1):
+                        sheet_name = f"Table_{idx}"
+                        grp_df.to_excel(writer, sheet_name=sheet_name, index=False)
+        else:
+            # CSV export with atomic write, side files, and manifest-based stale file cleanup (C3)
+            # 1. Clear ONLY side files recorded in the manifest from earlier runs of this tool
+            import json
+            manifest_file = out_p.parent / f".{out_p.stem}_tables_manifest.json"
+            if manifest_file.is_file():
+                try:
+                    with open(manifest_file, "r", encoding="utf-8") as mf:
+                        stale_names = json.load(mf)
+                    for sname in stale_names:
+                        if sname != out_p.name:
+                            sp = out_p.parent / sname
+                            if sp.is_file():
+                                try:
+                                    sp.unlink()
+                                except Exception as unlink_err:
+                                    logger.warning(f"Could not remove stale side file {sp}: {unlink_err}")
+                except Exception as e:
+                    logger.warning(f"Error reading tables manifest {manifest_file}: {e}")
+
+            # 2. Atomic write for all CSV files (primary + side files)
+            import time
+            temp_files: List[Tuple[Path, Path]] = []
+            pid = os.getpid()
+            ts = time.time_ns()
+            side_manifest: List[str] = [out_p.name]
+
+            try:
+                # Primary file temp
+                temp_primary = out_p.with_name(f".tmp_tab_{pid}_{ts}_{out_p.name}")
+                table_groups[0].to_csv(str(temp_primary), index=False, encoding="utf-8-sig")
+                temp_files.append((temp_primary, out_p))
+
+                # Side files if multiple tables
+                if len(table_groups) > 1:
+                    for idx, grp_df in enumerate(table_groups, 1):
+                        side_p = out_p.parent / f"{out_p.stem}_table{idx}.csv"
+                        side_manifest.append(side_p.name)
+                        temp_side = side_p.with_name(f".tmp_tab_{pid}_{ts}_{side_p.name}")
+                        grp_df.to_csv(str(temp_side), index=False, encoding="utf-8-sig")
+                        temp_files.append((temp_side, side_p))
+
+                # Atomically replace all files
+                for tmp_f, final_f in temp_files:
+                    os.replace(str(tmp_f), str(final_f))
+
+                # Record manifest of side files written
+                try:
+                    manifest_file.write_text(json.dumps(side_manifest), encoding="utf-8")
+                except Exception as e:
+                    logger.warning(f"Failed to write tables manifest {manifest_file}: {e}")
+
+                if len(table_groups) > 1:
+                    side_msg = f"Extracted {len(table_groups)} tables. Side files: {', '.join(side_manifest[1:])}"
+                    logger.info(
+                        f"Extracted {len(table_groups)} tables from '{in_p.name}'. "
+                        f"Produced primary '{out_p.name}' and side files: {side_manifest[1:]}."
+                    )
+                    if self.last_table_warning:
+                        self.last_table_warning = f"{self.last_table_warning}; {side_msg}"
+                    else:
+                        self.last_table_warning = side_msg
+            except Exception:
+                # Mid-write failure cleanup: unlink all temporary files
+                for tmp_f, _ in temp_files:
+                    if tmp_f.exists():
+                        try:
+                            tmp_f.unlink()
+                        except Exception as unlink_err:
+                            logger.warning(f"Could not remove temporary file {tmp_f}: {unlink_err}")
+                raise
 
         return out_p
 
@@ -415,130 +581,70 @@ class DocumentConverter:
         self,
         docx_path: str | Path,
         output_path: str | Path,
-        use_ms_word: bool = False,
     ) -> Path:
-        """
-        Convert DOCX to PDF.
-        Uses pure-Python python-docx + ReportLab by default for fast, reliable,
-        headless conversion without Microsoft Office dependencies.
-        """
+        """Convert DOCX to PDF using native MS Word COM automation."""
         in_p = Path(docx_path).resolve()
-        check_docx_encryption(in_p)
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        if use_ms_word and sys.platform == "win32":
-            try:
+        check_docx_encryption(in_p)
+
+        if sys.platform == "win32":
+            from image_converter.core.com_utils import (
+                com_initialized,
+                WD_ALERTS_NONE,
+                MSO_AUTOMATION_SECURITY_FORCE_DISABLE,
+                WD_FORMAT_PDF,
+            )
+            with com_initialized():
                 import win32com.client
-                word = win32com.client.DispatchEx("Word.Application")
-                word.Visible = False
-                word.DisplayAlerts = 0
                 try:
-                    doc = word.Documents.Open(str(in_p), ReadOnly=True)
-                    doc.SaveAs(str(out_p), FileFormat=17)
-                    doc.Close(False)
+                    word = win32com.client.DispatchEx("Word.Application")
+                except Exception as dispatch_err:
+                    logger.warning(f"Word COM not available: {dispatch_err}")
+                    word = None
+
+                if word is not None:
+                    try:
+                        word.Visible = False
+                        word.DisplayAlerts = WD_ALERTS_NONE
+                        word.AutomationSecurity = MSO_AUTOMATION_SECURITY_FORCE_DISABLE
+                        doc = None
+                        tmp_out = out_p.with_name(f"{out_p.stem}_tmp_{os.getpid()}_{time.time_ns()}.pdf")
+                        try:
+                            try:
+                                doc = word.Documents.Open(str(in_p), ReadOnly=True)
+                                doc.SaveAs(str(tmp_out), FileFormat=WD_FORMAT_PDF)
+                            finally:
+                                if doc is not None:
+                                    try:
+                                        doc.Close(False)
+                                    except Exception as close_err:
+                                        logger.warning(f"Error closing Word document: {close_err}")
+                            if tmp_out.is_file() and tmp_out.stat().st_size > 0:
+                                os.replace(tmp_out, out_p)
+                        finally:
+                            if tmp_out.exists():
+                                try:
+                                    tmp_out.unlink()
+                                except Exception as unlink_err:
+                                    logger.warning(f"Could not remove temporary file {tmp_out}: {unlink_err}")
+                    except Exception as e:
+                        logger.warning(f"MS Word COM DOCX-to-PDF conversion failed for {in_p.name}: {e}", exc_info=True)
+                        raise RuntimeError(f"Microsoft Word conversion failed for '{in_p.name}': {e}") from e
+                    finally:
+                        doc = None
+                        try:
+                            word.Quit()
+                        except Exception as quit_err:
+                            logger.warning(f"Error quitting Word application: {quit_err}")
+                        word = None
+                        import gc
+                        gc.collect()
                     if out_p.is_file() and out_p.stat().st_size > 0:
                         return out_p
-                finally:
-                    word.Quit()
-            except Exception:
-                pass
 
-        if not self.has_docx:
-            raise RuntimeError("python-docx is required for reading DOCX files.")
-        if not self.has_reportlab:
-            raise RuntimeError("reportlab is required for pure Python PDF generation.")
-
-        return self._docx_to_pdf_pure_python(in_p, out_p)
-
-    def _docx_to_pdf_pure_python(self, in_path: Path, out_path: Path) -> Path:
-        """Render DOCX paragraphs, headings, and tables into a clean ReportLab PDF."""
-        doc = docx.Document(str(in_path))
-        styles = getSampleStyleSheet()
-
-        normal_style = styles["Normal"]
-        normal_style.fontSize = 10
-        normal_style.leading = 13
-        normal_style.textColor = colors.HexColor("#1e293b")
-
-        h1_style = ParagraphStyle(
-            "DocH1",
-            parent=styles["Heading1"],
-            fontSize=18,
-            leading=22,
-            textColor=colors.HexColor("#0f172a"),
-            spaceAfter=10,
-            spaceBefore=14,
-        )
-        h2_style = ParagraphStyle(
-            "DocH2",
-            parent=styles["Heading2"],
-            fontSize=14,
-            leading=18,
-            textColor=colors.HexColor("#1e293b"),
-            spaceAfter=6,
-            spaceBefore=10,
-        )
-
-        story = []
-
-        # Iterate through paragraphs and tables
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if not text:
-                story.append(Spacer(1, 6))
-                continue
-
-            style_name = (para.style.name if para.style else "").lower()
-            if "heading 1" in style_name:
-                p_style = h1_style
-            elif "heading 2" in style_name or "heading 3" in style_name:
-                p_style = h2_style
-            else:
-                p_style = normal_style
-
-            # Escape HTML entities for ReportLab Paragraph
-            safe_text = html.escape(text)
-            story.append(Paragraph(safe_text, p_style))
-            story.append(Spacer(1, 4))
-
-        for tbl in doc.tables:
-            table_data = []
-            for row in tbl.rows:
-                row_cells = []
-                for cell in row.cells:
-                    cell_text = html.escape(cell.text.strip())
-                    row_cells.append(Paragraph(cell_text, normal_style))
-                table_data.append(row_cells)
-
-            if table_data:
-                rl_table = RLTable(table_data)
-                rl_table.setStyle(RLTableStyle([
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f1f5f9")),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("TOPPADDING", (0, 0), (-1, -1), 4),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ]))
-                story.append(Spacer(1, 8))
-                story.append(rl_table)
-                story.append(Spacer(1, 10))
-
-        if not story:
-            story.append(Paragraph("Empty Document", normal_style))
-
-        pdf_doc = SimpleDocTemplate(
-            str(out_path),
-            pagesize=letter,
-            leftMargin=40,
-            rightMargin=40,
-            topMargin=40,
-            bottomMargin=40,
-        )
-        pdf_doc.build(story)
-        return out_path
+        raise RuntimeError("Native DOCX to PDF conversion requires Microsoft Word on Windows.")
 
     def convert_docx_to_text(
         self,

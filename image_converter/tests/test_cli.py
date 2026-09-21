@@ -11,10 +11,9 @@ import pytest
 
 try:
     import pillow_heif
-except ImportError:
-    pillow_heif = None
-else:
     pillow_heif.register_heif_opener()
+except (ImportError, Exception):
+    pillow_heif = None
 
 from image_converter.cli import main, parse_color, collect_image_files, collect_convertible_files
 

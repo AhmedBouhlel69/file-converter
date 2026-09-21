@@ -49,39 +49,7 @@ _register(
     "compress_pdf",
 )
 
-# --- pdf_toolkit_engine (facade / compatibility) ---
-_register(
-    ".pdf_toolkit_engine",
-    "PDFToolkitEngine",
-    "images_to_pdf",
-    "repair_pdf",
-    "ocr_pdf",
-    "word_to_pdf",
-    "powerpoint_to_pdf",
-    "excel_to_pdf",
-    "html_to_pdf",
-    "pdf_to_images",
-    "pdf_to_word",
-    "pdf_to_powerpoint",
-    "pdf_to_excel",
-    "pdf_to_pdfa",
-    "edit_pdf_content",
-    "add_page_numbers",
-    "add_watermark",
-    "crop_pdf",
-    "get_form_fields",
-    "fill_form_fields",
-    "add_form_field",
-    "export_form_data",
-    "protect_pdf",
-    "unlock_pdf",
-    "sign_pdf",
-    "redact_pdf",
-    "summarize_pdf",
-    "translate_pdf",
-    "pdf_to_markdown",
-    "compare_pdfs",
-)
+
 
 # --- presentation_engine ---
 _register(

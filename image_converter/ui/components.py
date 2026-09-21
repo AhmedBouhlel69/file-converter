@@ -6,8 +6,11 @@ Supports Images, PDF, Word (DOCX), CSV, and Excel (XLSX).
 from __future__ import annotations
 
 import io
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 import fitz  # PyMuPDF
 from PIL import Image
@@ -350,8 +353,8 @@ class ImagePreviewWidget(QFrame):
             import os
             try:
                 os.startfile(str(self.current_file_path.parent))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to open file location for {self.current_file_path}: {e}", exc_info=True)
 
     def _copy_path_to_clipboard(self):
         if self.current_file_path:
@@ -385,7 +388,8 @@ class ImagePreviewWidget(QFrame):
             else:
                 self.lbl_meta_privacy.setText("🛡️ Clean (No tracking tags)")
                 self.lbl_meta_privacy.setStyleSheet("color: #34d399; font-weight: 500;")
-        except Exception:
+        except Exception as meta_err:
+            logger.debug(f"Could not load metadata privacy info for preview of {p.name}: {meta_err}")
             self.lbl_meta_privacy.setText("-")
             self.lbl_meta_privacy.setStyleSheet("")
 
@@ -406,7 +410,8 @@ class ImagePreviewWidget(QFrame):
                         )
                         self.preview_lbl.setPixmap(qpix)
                     doc.close()
-                except Exception:
+                except Exception as pdf_err:
+                    logger.debug(f"PDF thumbnail preview failed for {p.name}: {pdf_err}")
                     self.preview_lbl.setText("📄 PDF Document\n(Preview unavailable)")
 
             # 2. Word (DOCX) Preview
@@ -503,6 +508,7 @@ class ImagePreviewWidget(QFrame):
                     self.preview_lbl.setPixmap(pixmap)
 
         except Exception as e:
+            logger.debug(f"File preview loading failed for {p.name}: {e}")
             self.preview_lbl.setText(f"Preview unavailable:\n{str(e)[:60]}")
             self.lbl_dim.setText("-")
             self.lbl_format.setText(ext.lstrip(".").upper())
@@ -1012,8 +1018,8 @@ class QueueTableWidget(QTableWidget):
             import os
             try:
                 os.startfile(str(file_p.parent))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to open folder location for {file_p}: {e}", exc_info=True)
         elif act_copy_path and chosen == act_copy_path:
             from PySide6.QtWidgets import QApplication
             clipboard = QApplication.clipboard()
@@ -1096,7 +1102,8 @@ class QueueTableWidget(QTableWidget):
                     img.thumbnail((36, 36), Image.Resampling.NEAREST)
                     thumb_label.setPixmap(pil_to_qpixmap(img))
                     dim_item.setText(f"{img.width}×{img.height}")
-        except Exception:
+        except Exception as thumb_err:
+            logger.debug(f"Queue thumbnail generation fallback for {file_path.name}: {thumb_err}")
             thumb_label.setText("📄")
 
         self.setCellWidget(row, 1, thumb_label)

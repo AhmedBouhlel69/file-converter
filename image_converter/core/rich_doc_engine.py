@@ -6,9 +6,12 @@ Supports converting between ODT, RTF, PDF, Word (DOCX), and Plain Text.
 from __future__ import annotations
 
 import html
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 # striprtf for RTF reading
 _STRIPRTF_AVAILABLE = False
@@ -63,8 +66,8 @@ def get_rtf_metadata(file_path: str | Path) -> Dict[str, Any]:
             words = plain.split()
             word_count = len(words)
             line_count = len(plain.splitlines())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error extracting RTF metadata for {p.name}: {e}", exc_info=True)
 
     return {
         "file_name": p.name,
@@ -95,8 +98,8 @@ def get_odt_metadata(file_path: str | Path) -> Dict[str, Any]:
             para_count = len(paras)
             all_text = " ".join(teletype.extractText(p) for p in paras)
             word_count = len(all_text.split())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error extracting ODT metadata for {p.name}: {e}", exc_info=True)
 
     return {
         "file_name": p.name,
@@ -146,45 +149,16 @@ class RichDocumentConverter:
         rtf_path: str | Path,
         output_path: str | Path,
     ) -> Path:
-        """Convert RTF document to PDF."""
-        if not self.has_reportlab:
-            raise RuntimeError("reportlab is required for PDF generation.")
-
-        in_p = Path(rtf_path).resolve()
-        out_p = Path(output_path).resolve()
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-
-        plain = self.convert_rtf_to_text(in_p, out_p.with_suffix(".txt.tmp"))
-        text_content = plain.read_text(encoding="utf-8")
-        plain.unlink(missing_ok=True)
-
-        return self._text_to_pdf(text_content, out_p, title=in_p.stem)
+        """Convert RTF document to PDF natively via MS Word COM."""
+        return self._word_com_convert(rtf_path, output_path, format_code=17, format_name="PDF")
 
     def convert_rtf_to_docx(
         self,
         rtf_path: str | Path,
         output_path: str | Path,
     ) -> Path:
-        """Convert RTF document to DOCX."""
-        if not self.has_docx:
-            raise RuntimeError("python-docx is required for DOCX creation.")
-
-        in_p = Path(rtf_path).resolve()
-        out_p = Path(output_path).resolve()
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-
-        plain = self.convert_rtf_to_text(in_p, out_p.with_suffix(".txt.tmp"))
-        text_content = plain.read_text(encoding="utf-8")
-        plain.unlink(missing_ok=True)
-
-        doc = docx.Document()
-        for line in text_content.splitlines():
-            txt = line.strip()
-            if txt:
-                doc.add_paragraph(txt)
-
-        doc.save(str(out_p))
-        return out_p
+        """Convert RTF document to DOCX natively via MS Word COM."""
+        return self._word_com_convert(rtf_path, output_path, format_code=16, format_name="DOCX")
 
     def convert_text_to_rtf(
         self,
@@ -241,72 +215,112 @@ class RichDocumentConverter:
         odt_path: str | Path,
         output_path: str | Path,
     ) -> Path:
-        """Convert ODT document to PDF."""
-        if not self.has_reportlab:
-            raise RuntimeError("reportlab is required for PDF generation.")
-
-        in_p = Path(odt_path).resolve()
-        out_p = Path(output_path).resolve()
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-
-        plain = self.convert_odt_to_text(in_p, out_p.with_suffix(".txt.tmp"))
-        text_content = plain.read_text(encoding="utf-8")
-        plain.unlink(missing_ok=True)
-
-        return self._text_to_pdf(text_content, out_p, title=in_p.stem)
+        """Convert ODT document to PDF natively via MS Word COM."""
+        return self._word_com_convert(odt_path, output_path, format_code=17, format_name="PDF")
 
     def convert_odt_to_docx(
         self,
         odt_path: str | Path,
         output_path: str | Path,
     ) -> Path:
-        """Convert ODT document to DOCX."""
-        if not self.has_docx:
-            raise RuntimeError("python-docx is required for DOCX creation.")
-
-        in_p = Path(odt_path).resolve()
-        out_p = Path(output_path).resolve()
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-
-        plain = self.convert_odt_to_text(in_p, out_p.with_suffix(".txt.tmp"))
-        text_content = plain.read_text(encoding="utf-8")
-        plain.unlink(missing_ok=True)
-
-        doc = docx.Document()
-        for line in text_content.splitlines():
-            txt = line.strip()
-            if txt:
-                doc.add_paragraph(txt)
-
-        doc.save(str(out_p))
-        return out_p
+        """Convert ODT document to DOCX natively via MS Word COM."""
+        return self._word_com_convert(odt_path, output_path, format_code=16, format_name="DOCX")
 
     def convert_docx_to_odt(
         self,
         docx_path: str | Path,
         output_path: str | Path,
     ) -> Path:
-        """Convert DOCX document to ODT format."""
-        if not self.has_odfpy:
-            raise RuntimeError("odfpy is required for ODT creation.")
-        if not self.has_docx:
-            raise RuntimeError("python-docx is required for DOCX reading.")
+        """Convert DOCX document to ODT format natively via MS Word COM."""
+        return self._word_com_convert(docx_path, output_path, format_code=23, format_name="ODT")
 
-        in_p = Path(docx_path).resolve()
+    def convert_docx_to_rtf(
+        self,
+        docx_path: str | Path,
+        output_path: str | Path,
+    ) -> Path:
+        """Convert DOCX document to RTF format natively via MS Word COM."""
+        return self._word_com_convert(docx_path, output_path, format_code=6, format_name="RTF")
+
+    def convert_odt_to_rtf(
+        self,
+        odt_path: str | Path,
+        output_path: str | Path,
+    ) -> Path:
+        """Convert ODT document to RTF format natively via MS Word COM."""
+        return self._word_com_convert(odt_path, output_path, format_code=6, format_name="RTF")
+
+    def convert_rtf_to_odt(
+        self,
+        rtf_path: str | Path,
+        output_path: str | Path,
+    ) -> Path:
+        """Convert RTF document to ODT format natively via MS Word COM."""
+        return self._word_com_convert(rtf_path, output_path, format_code=23, format_name="ODT")
+        
+    def _word_com_convert(self, input_path: str | Path, output_path: str | Path, format_code: int, format_name: str) -> Path:
+        """Helper to use Word COM for conversions."""
+        in_p = Path(input_path).resolve()
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
+        
+        import os
+        import time
+        if os.name == "nt":
+            from image_converter.core.com_utils import (
+                com_initialized,
+                WD_ALERTS_NONE,
+                MSO_AUTOMATION_SECURITY_FORCE_DISABLE,
+            )
+            with com_initialized():
+                import win32com.client
+                try:
+                    word = win32com.client.DispatchEx("Word.Application")
+                except Exception as dispatch_err:
+                    logger.warning(f"Word COM not available: {dispatch_err}")
+                    word = None
 
-        doc_in = docx.Document(str(in_p))
-        odt_doc = opendocument.OpenDocumentText()
+                if word is not None:
+                    try:
+                        word.Visible = False
+                        word.DisplayAlerts = WD_ALERTS_NONE
+                        word.AutomationSecurity = MSO_AUTOMATION_SECURITY_FORCE_DISABLE
+                        doc = None
+                        tmp_out = out_p.with_name(f"{out_p.stem}_tmp_{os.getpid()}_{time.time_ns()}{out_p.suffix}")
+                        try:
+                            try:
+                                doc = word.Documents.Open(str(in_p), ReadOnly=True, ConfirmConversions=False)
+                                doc.SaveAs(str(tmp_out), FileFormat=format_code)
+                            finally:
+                                if doc is not None:
+                                    try:
+                                        doc.Close(False)
+                                    except Exception as close_err:
+                                        logger.warning(f"Error closing Word document: {close_err}")
+                            if tmp_out.is_file() and tmp_out.stat().st_size > 0:
+                                os.replace(tmp_out, out_p)
+                        finally:
+                            if tmp_out.exists():
+                                try:
+                                    tmp_out.unlink()
+                                except Exception as unlink_err:
+                                    logger.warning(f"Could not remove temporary file {tmp_out}: {unlink_err}")
+                    except Exception as e:
+                        logger.warning(f"MS Word COM conversion to {format_name} failed for {in_p.name}: {e}", exc_info=True)
+                        raise RuntimeError(f"Microsoft Word conversion to {format_name} failed for '{in_p.name}': {e}") from e
+                    finally:
+                        doc = None
+                        try:
+                            word.Quit()
+                        except Exception as quit_err:
+                            logger.warning(f"Error quitting Word application: {quit_err}")
+                        word = None
+                        import gc
+                        gc.collect()
+                    if out_p.is_file() and out_p.stat().st_size > 0:
+                        return out_p
 
-        for p in doc_in.paragraphs:
-            txt = p.text.strip()
-            if txt:
-                p_elem = odf_text.P(text=txt)
-                odt_doc.text.addElement(p_elem)
-
-        odt_doc.save(str(out_p))
-        return out_p
+        raise RuntimeError(f"Native conversion to {format_name} requires Microsoft Word on Windows.")
 
     def _text_to_pdf(self, text: str, out_path: Path, title: str) -> Path:
         """Render raw text into styled PDF."""

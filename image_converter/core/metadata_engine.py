@@ -6,6 +6,7 @@ across Images, PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), and OpenDocume
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
@@ -13,6 +14,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 import fitz  # PyMuPDF
 from PIL import Image, ImageOps
@@ -97,6 +100,7 @@ def get_detailed_metadata(file_path: str | Path, password: Optional[str] = None)
                     if "Artist" in fields or "Make" in fields:
                         meta_info["warnings"].append("Contains device or author information")
         except Exception as e:
+            logger.warning(f"Image metadata inspection failed for '{p.name}': {e}", exc_info=True)
             meta_info["warnings"].append(f"Image metadata inspection failed: {e}")
 
     # 2. PDF Documents
@@ -127,6 +131,7 @@ def get_detailed_metadata(file_path: str | Path, password: Optional[str] = None)
                 if any(k in fields for k in ("Author", "Creator", "Producer")):
                     meta_info["warnings"].append("Contains author or software generator metadata")
         except Exception as e:
+            logger.warning(f"PDF metadata inspection failed for '{p.name}': {e}", exc_info=True)
             meta_info["warnings"].append(f"PDF metadata inspection failed: {e}")
 
     # 3. Word DOCX
@@ -151,6 +156,7 @@ def get_detailed_metadata(file_path: str | Path, password: Optional[str] = None)
                 if "Author" in fields or "Last Modified By" in fields:
                     meta_info["warnings"].append("Contains document author tracking")
         except Exception as e:
+            logger.warning(f"DOCX metadata inspection failed for '{p.name}': {e}", exc_info=True)
             meta_info["warnings"].append(f"DOCX metadata inspection failed: {e}")
 
     # 4. PowerPoint PPTX
@@ -175,6 +181,7 @@ def get_detailed_metadata(file_path: str | Path, password: Optional[str] = None)
                 if "Author" in fields:
                     meta_info["warnings"].append("Contains presentation author metadata")
         except Exception as e:
+            logger.warning(f"PPTX metadata inspection failed for '{p.name}': {e}", exc_info=True)
             meta_info["warnings"].append(f"PPTX metadata inspection failed: {e}")
 
     # 5. Excel XLSX
@@ -196,6 +203,7 @@ def get_detailed_metadata(file_path: str | Path, password: Optional[str] = None)
                 if "Creator" in fields or "Lastmodifiedby" in fields:
                     meta_info["warnings"].append("Contains workbook creator information")
         except Exception as e:
+            logger.warning(f"Excel metadata inspection failed for '{p.name}': {e}", exc_info=True)
             meta_info["warnings"].append(f"Excel metadata inspection failed: {e}")
 
     # 6. OpenDocument ODT
@@ -214,8 +222,8 @@ def get_detailed_metadata(file_path: str | Path, password: Optional[str] = None)
                                 text = (elem.text or "").strip()
                                 if text:
                                     fields[tag.capitalize()] = text
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed parsing ODT meta.xml: {e}", exc_info=True)
                     if fields:
                         meta_info["has_metadata"] = True
                         meta_info["fields"] = fields
@@ -223,6 +231,7 @@ def get_detailed_metadata(file_path: str | Path, password: Optional[str] = None)
                         if "Creator" in fields or "Generator" in fields:
                             meta_info["warnings"].append("Contains author or software generator tracking")
         except Exception as e:
+            logger.warning(f"ODT metadata inspection failed for '{p.name}': {e}", exc_info=True)
             meta_info["warnings"].append(f"ODT metadata inspection failed: {e}")
 
     return meta_info
@@ -245,8 +254,11 @@ def strip_image_metadata(input_path: Path, output_path: Path) -> List[str]:
         # Correct orientation before stripping EXIF rotation tag
         try:
             clean_img = ImageOps.exif_transpose(img)
-        except Exception:
-            clean_img = img.copy()
+            if clean_img is None:
+                clean_img = img.copy()
+        except Exception as e:
+            logger.error(f"Failed to transpose EXIF orientation in '{input_path.name}': {e}", exc_info=True)
+            raise RuntimeError(f"Metadata stripping failed during EXIF orientation transpose for '{input_path.name}': {e}") from e
 
         # Re-create pure raster data to drop any lingering low-level metadata chunks
         sanitized = Image.new(clean_img.mode, clean_img.size)
@@ -459,8 +471,8 @@ def strip_file_metadata(
         if temp_target and temp_target.exists():
             try:
                 temp_target.unlink()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to remove temporary file {temp_target}: {e}", exc_info=True)
 
     orig_size = in_p.stat().st_size
     sanitized_size = out_p.stat().st_size if out_p.exists() and success else 0

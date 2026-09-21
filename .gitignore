@@ -30,3 +30,7 @@ desktop.ini
 .env
 .env.*
 !.env.example
+
+# Scratch and temporary testing artifacts
+scratch/
+

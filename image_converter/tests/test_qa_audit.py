@@ -449,6 +449,7 @@ class TestDocumentConversions:
         assert res.success is True
         assert "<h1>" in dst.read_text(encoding="utf-8").lower() or "<p>" in dst.read_text(encoding="utf-8").lower()
 
+    @pytest.mark.office
     def test_docx_to_odt(self, engine, tmp_path):
         src = _make_docx(tmp_path / "doc.docx")
         dst = tmp_path / "doc.odt"
@@ -456,6 +457,7 @@ class TestDocumentConversions:
         assert res.success is True
         assert dst.stat().st_size > 0
 
+    @pytest.mark.office
     def test_pptx_to_pdf(self, engine, tmp_path):
         src = _make_pptx(tmp_path / "pres.pptx")
         dst = tmp_path / "pres.pdf"

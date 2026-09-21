@@ -6,10 +6,13 @@ Supports Images, PDF, Word (DOCX), CSV, and Excel (XLSX).
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
@@ -513,7 +516,13 @@ class ImageConverterMainWindow(QMainWindow):
 
     def _on_file_completed(self, idx: int, result):
         if result.success:
-            self.queue_table.update_status(idx, "✅ Done", "#34d399")
+            if result.error_message:
+                self.queue_table.update_status(idx, "⚠️ Done (Warning)", "#fbbf24")
+                item = self.queue_table.item(idx, 0)
+                if item:
+                    item.setToolTip(result.error_message)
+            else:
+                self.queue_table.update_status(idx, "✅ Done", "#34d399")
             self.queue_table.update_converted_size(idx, result.output_size_bytes)
         else:
             self.queue_table.update_status(idx, "❌ Error", "#f87171")
@@ -597,13 +606,16 @@ UniversalFileConverterMainWindow = ImageConverterMainWindow
 
 
 def launch_app():
+    from image_converter.core.logging_config import setup_logger
+    setup_logger()
+
     # Set Windows AppUserModelID so taskbar displays our custom icon
     if sys.platform == "win32":
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("UniversalFileConverter.App.1.0")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to set Windows AppUserModelID: {e}", exc_info=True)
 
     app = QApplication(sys.argv)
     app.setApplicationName("Universal File Converter")

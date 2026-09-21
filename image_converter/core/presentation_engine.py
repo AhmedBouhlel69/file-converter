@@ -6,12 +6,19 @@ Supports converting between PPTX, PDF, Text, HTML, and Images.
 from __future__ import annotations
 
 import html
+import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from PIL import Image
+
+logger = logging.getLogger(__name__)
+
+# Single-instance COM server protection lock for PowerPoint
+_ppt_com_lock = threading.Lock()
 
 _PPTX_AVAILABLE = False
 try:
@@ -61,8 +68,8 @@ def get_pptx_metadata(file_path: str | Path) -> Dict[str, Any]:
                     if shape.has_text_frame and shape.text.strip():
                         title = shape.text.strip().split("\n")[0]
                         break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error extracting PPTX metadata for {p.name}: {e}", exc_info=True)
 
     return {
         "file_name": p.name,
@@ -230,80 +237,66 @@ class PresentationConverter:
         pptx_path: str | Path,
         output_path: str | Path,
     ) -> Path:
-        """Render PPTX slides into a clean printable PDF presentation."""
-        self._ensure_pptx()
-        if not self.has_reportlab:
-            raise RuntimeError("reportlab is required for PPTX to PDF conversion.")
-
+        """Render PPTX slides into a PDF presentation natively via COM."""
         in_p = Path(pptx_path).resolve()
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        prs = Presentation(str(in_p))
-        styles = getSampleStyleSheet()
+        if os.name == "nt":
+            import time
+            from image_converter.core.com_utils import (
+                com_initialized,
+                PP_ALERTS_NONE,
+                MSO_AUTOMATION_SECURITY_FORCE_DISABLE,
+                PP_SAVE_AS_PDF,
+            )
+            with _ppt_com_lock:
+                with com_initialized():
+                    import win32com.client
+                    try:
+                        powerpoint = win32com.client.DispatchEx("Powerpoint.Application")
+                    except Exception as dispatch_err:
+                        logger.warning(f"PowerPoint COM not available: {dispatch_err}")
+                        powerpoint = None
 
-        title_style = ParagraphStyle(
-            "SlideTitle",
-            parent=styles["Heading1"],
-            fontSize=20,
-            leading=24,
-            textColor=colors.HexColor("#1e293b"),
-            spaceAfter=14,
-        )
-        body_style = ParagraphStyle(
-            "SlideBody",
-            parent=styles["Normal"],
-            fontSize=11,
-            leading=15,
-            textColor=colors.HexColor("#334155"),
-            spaceAfter=6,
-        )
-        slide_num_style = ParagraphStyle(
-            "SlideNumber",
-            parent=styles["Normal"],
-            fontSize=9,
-            leading=11,
-            textColor=colors.HexColor("#64748b"),
-            spaceAfter=8,
-        )
+                    if powerpoint is not None:
+                        try:
+                            powerpoint.DisplayAlerts = PP_ALERTS_NONE
+                            powerpoint.AutomationSecurity = MSO_AUTOMATION_SECURITY_FORCE_DISABLE
+                            presentation = None
+                            tmp_out = out_p.with_name(f"{out_p.stem}_tmp_{os.getpid()}_{time.time_ns()}.pdf")
+                            try:
+                                try:
+                                    presentation = powerpoint.Presentations.Open(str(in_p), ReadOnly=True, WithWindow=False)
+                                    presentation.SaveAs(str(tmp_out), PP_SAVE_AS_PDF)
+                                finally:
+                                    if presentation is not None:
+                                        try:
+                                            presentation.Close()
+                                        except Exception as close_err:
+                                            logger.warning(f"Error closing PowerPoint presentation: {close_err}")
+                                if tmp_out.is_file() and tmp_out.stat().st_size > 0:
+                                    os.replace(tmp_out, out_p)
+                            finally:
+                                if tmp_out.exists():
+                                    try:
+                                        tmp_out.unlink()
+                                    except Exception as unlink_err:
+                                        logger.warning(f"Could not remove temporary file {tmp_out}: {unlink_err}")
+                        except Exception as e:
+                            logger.warning(f"MS PowerPoint COM conversion failed for {in_p.name}: {e}", exc_info=True)
+                            raise RuntimeError(f"Microsoft PowerPoint conversion failed for '{in_p.name}': {e}") from e
+                        finally:
+                            presentation = None
+                            try:
+                                powerpoint.Quit()
+                            except Exception as quit_err:
+                                logger.warning(f"Error quitting PowerPoint application: {quit_err}")
+                            powerpoint = None
+                        if out_p.is_file() and out_p.stat().st_size > 0:
+                            return out_p
 
-        story = []
-
-        for idx, slide in enumerate(prs.slides, 1):
-            if idx > 1:
-                story.append(PageBreak())
-
-            story.append(Paragraph(f"SLIDE {idx}", slide_num_style))
-
-            slide_texts = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for p in shape.text_frame.paragraphs:
-                        txt = p.text.strip()
-                        if txt:
-                            slide_texts.append(txt)
-
-            if slide_texts:
-                # First text item as slide heading
-                story.append(Paragraph(html.escape(slide_texts[0]), title_style))
-                for item in slide_texts[1:]:
-                    story.append(Paragraph(f"• {html.escape(item)}", body_style))
-            else:
-                story.append(Paragraph("<i>(Empty Slide)</i>", body_style))
-
-        if not story:
-            story.append(Paragraph("Empty Presentation", title_style))
-
-        doc = SimpleDocTemplate(
-            str(out_p),
-            pagesize=landscape(letter),
-            leftMargin=36,
-            rightMargin=36,
-            topMargin=36,
-            bottomMargin=36,
-        )
-        doc.build(story)
-        return out_p
+        raise RuntimeError("Native PPTX to PDF conversion requires Microsoft PowerPoint on Windows.")
 
     def convert_pptx_to_images(
         self,

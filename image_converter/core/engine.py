@@ -5,6 +5,7 @@ Supports HEIC, JPG, PNG, WEBP, BMP, TIFF, GIF, ICO, PDF, DOCX, XLSX, CSV, TXT, J
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import time
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageOps
+
+logger = logging.getLogger(__name__)
 
 from .security import (
     SecurityError,
@@ -366,6 +369,56 @@ class ImageConverterEngine:
             return img.convert("RGB")
         return img
 
+    def _verify_and_create_result(
+        self,
+        in_p: Path,
+        final_out: Path,
+        in_format: str,
+        target_fmt_upper: str,
+        input_size: int,
+        t_start: float,
+        input_dimensions: Tuple[int, int] = (0, 0),
+        output_dimensions: Tuple[int, int] = (0, 0),
+        warning_message: Optional[str] = None,
+    ) -> ConversionResult:
+        duration = time.perf_counter() - t_start
+        # Deliberate design: 0-byte output is unconditionally treated as failure/corrupt because all
+        # supported target formats (PDF, DOCX, XLSX, images, HTML, etc.) require header bytes or container structures.
+        if not final_out.exists() or final_out.stat().st_size == 0:
+            if final_out.exists():
+                try:
+                    final_out.unlink()
+                except Exception as e:
+                    logger.warning(f"Failed to unlink empty or corrupt output '{final_out}': {e}", exc_info=True)
+            return ConversionResult(
+                success=False,
+                input_path=str(in_p),
+                output_path=str(final_out),
+                input_format=in_format,
+                output_format=target_fmt_upper,
+                input_dimensions=input_dimensions,
+                output_dimensions=(0, 0),
+                input_size_bytes=input_size,
+                output_size_bytes=0,
+                duration_seconds=duration,
+                error_message=f"Conversion failed: output file '{final_out.name}' was not created or is 0 bytes (corrupt output).",
+            )
+
+        out_size = final_out.stat().st_size
+        return ConversionResult(
+            success=True,
+            input_path=str(in_p),
+            output_path=str(final_out),
+            input_format=in_format,
+            output_format=target_fmt_upper,
+            input_dimensions=input_dimensions,
+            output_dimensions=output_dimensions,
+            input_size_bytes=input_size,
+            output_size_bytes=out_size,
+            duration_seconds=duration,
+            error_message=warning_message,
+        )
+
     def convert_single(
         self,
         input_path: str | Path,
@@ -394,6 +447,7 @@ class ImageConverterEngine:
             validate_input_file(in_p, max_size_bytes=config.max_file_size)
             validate_output_path(out_p)
         except Exception as sec_err:
+            logger.warning(f"File validation failed for '{in_p}' -> '{out_p}': {sec_err}")
             return ConversionResult(
                 success=False,
                 input_path=str(in_p),
@@ -431,16 +485,13 @@ class ImageConverterEngine:
                     duration_seconds=time.perf_counter() - t_start,
                     error_message=strip_res.get("error_message") or "Failed to strip metadata",
                 )
-            out_size = out_p.stat().st_size if out_p.exists() else 0
-            return ConversionResult(
-                success=True,
-                input_path=str(in_p),
-                output_path=str(out_p),
-                input_format=in_ext.lstrip(".").upper(),
-                output_format=out_p.suffix.lstrip(".").upper(),
-                input_size_bytes=input_size,
-                output_size_bytes=out_size,
-                duration_seconds=time.perf_counter() - t_start,
+            return self._verify_and_create_result(
+                in_p=in_p,
+                final_out=out_p,
+                in_format=in_ext.lstrip(".").upper(),
+                target_fmt_upper=out_p.suffix.lstrip(".").upper(),
+                input_size=input_size,
+                t_start=t_start,
             )
 
         try:
@@ -471,12 +522,13 @@ class ImageConverterEngine:
                         in_p, out_p, target_format=target_fmt_upper, password=config.password
                     )
                 elif target_fmt_upper == "PPTX":
-                    txt_tmp = out_p.with_suffix(".tmp.txt")
-                    self.doc_converter.convert_pdf_to_text(
-                        in_p, txt_tmp, password=config.password, enable_ocr=config.enable_ocr
+                    return ConversionResult(
+                        success=False,
+                        input_path=str(in_p),
+                        output_path=str(out_p),
+                        duration_seconds=time.perf_counter() - t_start,
+                        error_message="Direct PDF to PowerPoint conversion is not supported without layout loss.",
                     )
-                    final_out = self.pres_converter.convert_text_to_pptx(txt_tmp, out_p)
-                    txt_tmp.unlink(missing_ok=True)
                 else:
                     return ConversionResult(
                         success=False,
@@ -486,16 +538,15 @@ class ImageConverterEngine:
                         error_message=f"Cannot convert PDF to {target_fmt_upper}",
                     )
 
-                out_size = final_out.stat().st_size if final_out.exists() else 0
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(final_out),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
-                    input_size_bytes=input_size,
-                    output_size_bytes=out_size,
-                    duration_seconds=time.perf_counter() - t_start,
+                warning_msg = getattr(self.doc_converter, "last_table_warning", None)
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=final_out,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
+                    input_size=input_size,
+                    t_start=t_start,
+                    warning_message=warning_msg,
                 )
 
             # -----------------------------------------------------------------
@@ -517,15 +568,15 @@ class ImageConverterEngine:
                 elif target_fmt_upper == "ODT":
                     final_out = self.rich_converter.convert_docx_to_odt(in_p, out_p)
                 elif target_fmt_upper == "RTF":
-                    txt_tmp = out_p.with_suffix(".tmp.txt")
-                    self.doc_converter.convert_docx_to_text(in_p, txt_tmp)
-                    final_out = self.rich_converter.convert_text_to_rtf(txt_tmp, out_p)
-                    txt_tmp.unlink(missing_ok=True)
+                    final_out = self.rich_converter.convert_docx_to_rtf(in_p, out_p)
                 elif target_fmt_upper == "PPTX":
-                    txt_tmp = out_p.with_suffix(".tmp.txt")
-                    self.doc_converter.convert_docx_to_text(in_p, txt_tmp)
-                    final_out = self.pres_converter.convert_text_to_pptx(txt_tmp, out_p)
-                    txt_tmp.unlink(missing_ok=True)
+                    return ConversionResult(
+                        success=False,
+                        input_path=str(in_p),
+                        output_path=str(out_p),
+                        duration_seconds=time.perf_counter() - t_start,
+                        error_message="Direct Word to PowerPoint conversion is not supported without layout loss.",
+                    )
                 else:
                     return ConversionResult(
                         success=False,
@@ -535,16 +586,13 @@ class ImageConverterEngine:
                         error_message=f"Cannot convert Word document to {target_fmt_upper}",
                     )
 
-                out_size = final_out.stat().st_size if final_out.exists() else 0
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(final_out),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
-                    input_size_bytes=input_size,
-                    output_size_bytes=out_size,
-                    duration_seconds=time.perf_counter() - t_start,
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=final_out,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
+                    input_size=input_size,
+                    t_start=t_start,
                 )
 
             # -----------------------------------------------------------------
@@ -564,16 +612,13 @@ class ImageConverterEngine:
                     )
                     final_out = files[0] if files else out_p
                 elif target_fmt_upper == "DOCX":
-                    txt_tmp = out_p.with_suffix(".tmp.txt")
-                    self.pres_converter.convert_pptx_to_text(in_p, txt_tmp)
-                    import docx
-                    d = docx.Document()
-                    for line in txt_tmp.read_text(encoding="utf-8").splitlines():
-                        if line.strip():
-                            d.add_paragraph(line.strip())
-                    d.save(str(out_p))
-                    txt_tmp.unlink(missing_ok=True)
-                    final_out = out_p
+                    return ConversionResult(
+                        success=False,
+                        input_path=str(in_p),
+                        output_path=str(out_p),
+                        duration_seconds=time.perf_counter() - t_start,
+                        error_message="Direct PowerPoint to Word conversion is not supported without layout loss.",
+                    )
                 else:
                     return ConversionResult(
                         success=False,
@@ -583,16 +628,13 @@ class ImageConverterEngine:
                         error_message=f"Cannot convert PowerPoint presentation to {target_fmt_upper}",
                     )
 
-                out_size = final_out.stat().st_size if final_out.exists() else 0
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(final_out),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
-                    input_size_bytes=input_size,
-                    output_size_bytes=out_size,
-                    duration_seconds=time.perf_counter() - t_start,
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=final_out,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
+                    input_size=input_size,
+                    t_start=t_start,
                 )
 
             # -----------------------------------------------------------------
@@ -607,10 +649,7 @@ class ImageConverterEngine:
                 elif target_fmt_upper == "TXT":
                     final_out = self.rich_converter.convert_odt_to_text(in_p, out_p)
                 elif target_fmt_upper == "RTF":
-                    txt_tmp = out_p.with_suffix(".tmp.txt")
-                    self.rich_converter.convert_odt_to_text(in_p, txt_tmp)
-                    final_out = self.rich_converter.convert_text_to_rtf(txt_tmp, out_p)
-                    txt_tmp.unlink(missing_ok=True)
+                    final_out = self.rich_converter.convert_odt_to_rtf(in_p, out_p)
                 else:
                     return ConversionResult(
                         success=False,
@@ -620,16 +659,13 @@ class ImageConverterEngine:
                         error_message=f"Cannot convert ODT to {target_fmt_upper}",
                     )
 
-                out_size = final_out.stat().st_size if final_out.exists() else 0
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(final_out),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
-                    input_size_bytes=input_size,
-                    output_size_bytes=out_size,
-                    duration_seconds=time.perf_counter() - t_start,
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=final_out,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
+                    input_size=input_size,
+                    t_start=t_start,
                 )
 
             # -----------------------------------------------------------------
@@ -644,10 +680,7 @@ class ImageConverterEngine:
                 elif target_fmt_upper == "TXT":
                     final_out = self.rich_converter.convert_rtf_to_text(in_p, out_p)
                 elif target_fmt_upper == "ODT":
-                    docx_tmp = out_p.with_suffix(".tmp.docx")
-                    self.rich_converter.convert_rtf_to_docx(in_p, docx_tmp)
-                    final_out = self.rich_converter.convert_docx_to_odt(docx_tmp, out_p)
-                    docx_tmp.unlink(missing_ok=True)
+                    final_out = self.rich_converter.convert_rtf_to_odt(in_p, out_p)
                 else:
                     return ConversionResult(
                         success=False,
@@ -657,16 +690,13 @@ class ImageConverterEngine:
                         error_message=f"Cannot convert RTF to {target_fmt_upper}",
                     )
 
-                out_size = final_out.stat().st_size if final_out.exists() else 0
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(final_out),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
-                    input_size_bytes=input_size,
-                    output_size_bytes=out_size,
-                    duration_seconds=time.perf_counter() - t_start,
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=final_out,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
+                    input_size=input_size,
+                    t_start=t_start,
                 )
 
             # -----------------------------------------------------------------
@@ -703,16 +733,13 @@ class ImageConverterEngine:
                         error_message=f"Cannot convert TXT to {target_fmt_upper}",
                     )
 
-                out_size = final_out.stat().st_size if final_out.exists() else 0
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(final_out),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
-                    input_size_bytes=input_size,
-                    output_size_bytes=out_size,
-                    duration_seconds=time.perf_counter() - t_start,
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=final_out,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
+                    input_size=input_size,
+                    t_start=t_start,
                 )
 
             # -----------------------------------------------------------------
@@ -739,16 +766,13 @@ class ImageConverterEngine:
                         error_message=f"Cannot convert CSV to {target_fmt_upper}",
                     )
 
-                out_size = final_out.stat().st_size if final_out.exists() else 0
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(final_out),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
-                    input_size_bytes=input_size,
-                    output_size_bytes=out_size,
-                    duration_seconds=time.perf_counter() - t_start,
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=final_out,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
+                    input_size=input_size,
+                    t_start=t_start,
                 )
 
             # -----------------------------------------------------------------
@@ -781,49 +805,124 @@ class ImageConverterEngine:
                         error_message=f"Cannot convert Excel to {target_fmt_upper}",
                     )
 
-                out_size = final_out.stat().st_size if final_out.exists() else 0
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(final_out),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
-                    input_size_bytes=input_size,
-                    output_size_bytes=out_size,
-                    duration_seconds=time.perf_counter() - t_start,
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=final_out,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
+                    input_size=input_size,
+                    t_start=t_start,
                 )
 
             # -----------------------------------------------------------------
             # 9. Image Input (Pillow + pillow-heif or OCR)
             # -----------------------------------------------------------------
             else:
-                # Check for OCR text extraction from image to TXT or DOCX
-                if target_fmt_upper in ("TXT", "DOCX"):
+                if target_fmt_upper == "DOCX":
+                    in_format = in_p.suffix.lstrip(".").upper()
+                    import io
+                    import docx
+                    from docx.shared import Inches, Length
+
+                    # 1. Open image, force load to catch corrupt/truncated files, apply EXIF orientation
+                    try:
+                        with Image.open(in_p) as raw_im:
+                            raw_im.load()
+                            # EXIF auto-orientation (tags 3, 6, 8)
+                            im = ImageOps.exif_transpose(raw_im)
+                            if im is None:
+                                im = raw_im.copy()
+                            else:
+                                im = im.copy()
+                    except Exception as e:
+                        logger.warning(f"Image-to-DOCX failed opening image '{in_p.name}': {e}", exc_info=True)
+                        return ConversionResult(
+                            success=False,
+                            input_path=str(in_p),
+                            output_path=str(out_p),
+                            duration_seconds=round(time.time() - t_start, 3),
+                            error_message=f"Corrupt or unreadable image file: {e}",
+                        )
+
+                    # 2. Format normalization: normalize any format/mode to PNG
+                    # Pillow cannot save CMYK or I;16 as PNG directly without conversion.
+                    if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                        im = im.convert("RGBA")
+                    elif im.mode == "CMYK":
+                        im = im.convert("RGB")
+                    elif im.mode in ("I;16", "I;16L", "I;16B"):
+                        im = im.point(lambda i: i * (1.0 / 256.0)).convert("L").convert("RGB")
+                    elif im.mode in ("I", "F"):
+                        im = im.convert("RGB")
+                    elif im.mode != "RGB":
+                        im = im.convert("RGB")
+
+                    img_buf = io.BytesIO()
+                    im.save(img_buf, format="PNG")
+                    img_buf.seek(0)
+                    iw, ih = im.size
+
+                    # 3. Fit-to-page calculation respecting page margins in EMU
+                    d = docx.Document()
+                    section = d.sections[0]
+                    avail_w = section.page_width - section.left_margin - section.right_margin
+                    avail_h = section.page_height - section.top_margin - section.bottom_margin
+
+                    # Determine DPI (safe default: 96.0; guard against 0, negative, invalid)
+                    dpi_x, dpi_y = 96.0, 96.0
+                    raw_dpi = im.info.get("dpi")
+                    if raw_dpi is not None:
+                        try:
+                            if isinstance(raw_dpi, (int, float)):
+                                if raw_dpi > 0:
+                                    dpi_x = dpi_y = float(raw_dpi)
+                            elif isinstance(raw_dpi, (tuple, list)) and len(raw_dpi) >= 2:
+                                dx, dy = float(raw_dpi[0]), float(raw_dpi[1])
+                                if dx > 0:
+                                    dpi_x = dx
+                                if dy > 0:
+                                    dpi_y = dy
+                        except (ValueError, TypeError) as dpi_err:
+                            logger.warning(f"Malformed DPI metadata {raw_dpi!r} in image '{img_p.name}': {dpi_err}. Defaulting to (96.0, 96.0).")
+                            dpi_x, dpi_y = 96.0, 96.0
+
+                    # Natural dimensions in EMUs (1 inch = 914,400 EMUs)
+                    nat_w = max(1, int((iw / dpi_x) * 914400))
+                    nat_h = max(1, int((ih / dpi_y) * 914400))
+
+                    # Scale down ONLY if either dimension exceeds available page area, preserving aspect ratio.
+                    # Policy: Small images are NOT upscaled (scale capped at 1.0) to avoid pixelation.
+                    scale_w = avail_w / nat_w if nat_w > avail_w else 1.0
+                    scale_h = avail_h / nat_h if nat_h > avail_h else 1.0
+                    scale = min(scale_w, scale_h)
+
+                    target_w = max(1, int(nat_w * scale))
+                    target_h = max(1, int(nat_h * scale))
+
+                    d.add_picture(img_buf, width=Length(target_w), height=Length(target_h))
+                    d.save(str(out_p))
+                    final_out = out_p
+                    return self._verify_and_create_result(
+                        in_p=in_p,
+                        final_out=final_out,
+                        in_format=in_format,
+                        target_fmt_upper=target_fmt_upper,
+                        input_size=input_size,
+                        t_start=t_start,
+                    )
+                elif target_fmt_upper == "TXT":
                     in_format = in_p.suffix.lstrip(".").upper()
                     from .ocr_engine import ocr_image_to_text
                     extracted_text = ocr_image_to_text(in_p)
-                    if target_fmt_upper == "TXT":
-                        out_p.write_text(extracted_text, encoding="utf-8")
-                        final_out = out_p
-                    else:
-                        import docx
-                        d = docx.Document()
-                        for line in extracted_text.splitlines():
-                            if line.strip():
-                                d.add_paragraph(line.strip())
-                        d.save(str(out_p))
-                        final_out = out_p
-
-                    out_size = final_out.stat().st_size if final_out.exists() else 0
-                    return ConversionResult(
-                        success=True,
-                        input_path=str(in_p),
-                        output_path=str(final_out),
-                        input_format=in_format,
-                        output_format=target_fmt_upper,
-                        input_size_bytes=input_size,
-                        output_size_bytes=out_size,
-                        duration_seconds=time.perf_counter() - t_start,
+                    out_p.write_text(extracted_text, encoding="utf-8")
+                    final_out = out_p
+                    return self._verify_and_create_result(
+                        in_p=in_p,
+                        final_out=final_out,
+                        in_format=in_format,
+                        target_fmt_upper=target_fmt_upper,
+                        input_size=input_size,
+                        t_start=t_start,
                     )
 
                 if target_fmt_upper not in PILLOW_FORMAT_MAP:
@@ -850,12 +949,18 @@ class ImageConverterEngine:
                     orig_w, orig_h = src_img.size
 
                     # Auto-orient based on EXIF tag if requested
+                    orientation_warning = None
                     if config.auto_orient:
                         try:
                             work_img = ImageOps.exif_transpose(src_img)
-                        except Exception:
+                        except Exception as orient_err:
                             work_img = src_img.copy()
+                            orientation_warning = f"Auto-orientation failed for '{in_p.name}': {orient_err}. Preserved original orientation."
+                            logger.warning(orientation_warning, exc_info=True)
                     else:
+                        work_img = src_img.copy()
+
+                    if work_img is None:
                         work_img = src_img.copy()
 
                     # Preserve EXIF bytes if requested and present
@@ -949,23 +1054,20 @@ class ImageConverterEngine:
                         if temp_path and temp_path.exists():
                             temp_path.unlink()
 
-                output_size = out_p.stat().st_size
-                duration = time.perf_counter() - t_start
-
-                return ConversionResult(
-                    success=True,
-                    input_path=str(in_p),
-                    output_path=str(out_p),
-                    input_format=in_format,
-                    output_format=target_fmt_upper,
+                return self._verify_and_create_result(
+                    in_p=in_p,
+                    final_out=out_p,
+                    in_format=in_format,
+                    target_fmt_upper=target_fmt_upper,
                     input_dimensions=(orig_w, orig_h),
                     output_dimensions=(out_w, out_h),
-                    input_size_bytes=input_size,
-                    output_size_bytes=output_size,
-                    duration_seconds=duration,
+                    input_size=input_size,
+                    t_start=t_start,
+                    warning_message=orientation_warning,
                 )
 
         except Exception as e:
+            logger.error(f"Conversion error for '{in_p.name}': {e}", exc_info=True)
             duration = time.perf_counter() - t_start
             return ConversionResult(
                 success=False,
@@ -1000,6 +1102,7 @@ class ImageConverterEngine:
             try:
                 res = self.convert_single(in_path, out_path, config)
             except Exception as e:
+                logger.error(f"Single task conversion raised unexpected exception for '{in_path}': {e}", exc_info=True)
                 res = ConversionResult(
                     success=False,
                     input_path=str(in_path),
@@ -1009,8 +1112,8 @@ class ImageConverterEngine:
             if progress_callback:
                 try:
                     progress_callback(1, 1, res)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Progress callback error in single conversion: {e}", exc_info=True)
             return [res]
 
         workers = max_workers
@@ -1035,6 +1138,7 @@ class ImageConverterEngine:
             try:
                 res_item = self.convert_single(in_p_task, out_p_task, cfg_task)
             except Exception as e:
+                logger.error(f"Worker task conversion raised unexpected exception for '{in_p_task}': {e}", exc_info=True)
                 res_item = ConversionResult(
                     success=False,
                     input_path=str(in_p_task),
@@ -1049,8 +1153,8 @@ class ImageConverterEngine:
             if progress_callback:
                 try:
                     progress_callback(current_completed, total, res_item)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Progress callback error in batch worker: {e}", exc_info=True)
 
             return idx, res_item
 
@@ -1085,8 +1189,8 @@ class ImageConverterEngine:
                     if progress_callback:
                         try:
                             progress_callback(current_completed, total, fail_res)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"Progress callback error on future error: {e}", exc_info=True)
 
         return [r for r in results if r is not None]
 
@@ -1124,6 +1228,111 @@ class ImageConverterEngine:
             error_message=res.get("error_message"),
         )
 
+    def split_pdf(
+        self,
+        input_path: str | Path,
+        output_dir: str | Path,
+        mode: str = "ranges",
+        ranges: Optional[str] = None,
+        n: int = 1,
+    ) -> ConversionResult:
+        """
+        Split a PDF into multiple documents according to mode and ranges.
+        Validates page ranges upfront and returns ConversionResult(success=False, error_message=...)
+        on any validation or processing failure.
+        """
+        t_start = time.perf_counter()
+        in_p = Path(input_path).resolve()
+        out_d = Path(output_dir).resolve()
+
+        if not in_p.is_file():
+            return ConversionResult(
+                success=False,
+                input_path=str(in_p),
+                output_path=str(out_d),
+                duration_seconds=0.0,
+                error_message=f"Input file not found: {in_p}",
+            )
+
+        try:
+            from .pdf_tools import split_pdf as core_split_pdf
+            generated = core_split_pdf(in_p, out_d, mode=mode, ranges=ranges, n=n)
+            if not generated:
+                return ConversionResult(
+                    success=False,
+                    input_path=str(in_p),
+                    output_path=str(out_d),
+                    duration_seconds=time.perf_counter() - t_start,
+                    error_message="Split produced no files.",
+                )
+            first_out = Path(generated[0])
+            res = self._verify_and_create_result(
+                in_p=in_p,
+                final_out=first_out,
+                in_format="PDF",
+                target_fmt_upper="PDF",
+                input_size=in_p.stat().st_size if in_p.exists() else 0,
+                t_start=t_start,
+            )
+            res.output_path = str(out_d)
+            return res
+        except Exception as e:
+            logger.error(f"PDF split failed for '{in_p}': {e}", exc_info=True)
+            return ConversionResult(
+                success=False,
+                input_path=str(in_p),
+                output_path=str(out_d),
+                duration_seconds=time.perf_counter() - t_start,
+                error_message=str(e),
+            )
+
+    def compress_pdf(
+        self,
+        input_path: str | Path,
+        output_path: str | Path,
+        level: str = "medium",
+    ) -> ConversionResult:
+        """
+        Compress a PDF document.
+        Validates output size, page count, and returns ConversionResult.
+        """
+        t_start = time.perf_counter()
+        in_p = Path(input_path).resolve()
+        out_p = Path(output_path).resolve()
+
+        if not in_p.is_file():
+            return ConversionResult(
+                success=False,
+                input_path=str(in_p),
+                output_path=str(out_p),
+                duration_seconds=0.0,
+                error_message=f"Input file not found: {in_p}",
+            )
+
+        try:
+            from .pdf_tools import compress_pdf as core_compress_pdf
+            stats = core_compress_pdf(in_p, out_p, level=level)
+            res = self._verify_and_create_result(
+                in_p=in_p,
+                final_out=out_p,
+                in_format="PDF",
+                target_fmt_upper="PDF",
+                input_size=in_p.stat().st_size if in_p.exists() else 0,
+                t_start=t_start,
+            )
+            return res
+        except Exception as e:
+            logger.error(f"PDF compression failed for '{in_p}': {e}", exc_info=True)
+            return ConversionResult(
+                success=False,
+                input_path=str(in_p),
+                output_path=str(out_p),
+                duration_seconds=time.perf_counter() - t_start,
+                error_message=str(e),
+            )
+
 
 # Export UniversalConverterEngine alias
 UniversalConverterEngine = ImageConverterEngine
+
+

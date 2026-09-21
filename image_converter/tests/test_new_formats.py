@@ -84,6 +84,7 @@ def test_pptx_metadata_and_preview(tmp_path: Path):
     assert "Universal Converter" in meta["title"]
 
 
+@pytest.mark.office
 def test_pptx_to_pdf(engine, tmp_path: Path):
     pptx_path = tmp_path / "pres.pptx"
     create_sample_pptx(pptx_path)
@@ -163,6 +164,7 @@ def test_odt_to_pdf_and_txt(engine, tmp_path: Path):
     assert "OpenDocument format" in out_txt.read_text(encoding="utf-8")
 
 
+@pytest.mark.office
 def test_docx_to_odt(engine, tmp_path: Path):
     docx_path = tmp_path / "source.docx"
     d = docx.Document()
@@ -189,6 +191,7 @@ def test_rtf_metadata(tmp_path: Path):
     assert meta["word_count"] > 5
 
 
+@pytest.mark.office
 def test_rtf_to_txt_and_docx(engine, tmp_path: Path):
     rtf_path = tmp_path / "doc.rtf"
     create_sample_rtf(rtf_path)

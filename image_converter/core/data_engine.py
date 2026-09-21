@@ -8,10 +8,14 @@ from __future__ import annotations
 import csv
 import html
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # Check openpyxl
 _OPENPYXL_AVAILABLE = False
@@ -57,8 +61,8 @@ def read_csv_with_fallback(file_path: str | Path, **kwargs) -> pd.DataFrame:
             encodings_to_try.append("utf-16")
         elif bom.startswith(b"\xef\xbb\xbf"):
             encodings_to_try.append("utf-8-sig")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error reading BOM signatures for CSV {p.name}: {e}", exc_info=True)
 
     # 2. Standard common encodings
     encodings_to_try.extend(["utf-8", "cp1252", "latin-1", "iso-8859-1"])
@@ -70,8 +74,8 @@ def read_csv_with_fallback(file_path: str | Path, **kwargs) -> pd.DataFrame:
         best = results.best()
         if best and best.encoding:
             encodings_to_try.append(best.encoding)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Charset detection error for CSV {p.name}: {e}", exc_info=True)
 
     encodings_to_try.append("utf-16")
 
@@ -85,7 +89,8 @@ def read_csv_with_fallback(file_path: str | Path, **kwargs) -> pd.DataFrame:
             if any("\x00" in str(col) for col in df.columns):
                 continue
             return df
-        except (UnicodeDecodeError, UnicodeError):
+        except (UnicodeDecodeError, UnicodeError) as enc_err:
+            logger.debug(f"Candidate encoding '{enc}' failed for CSV '{p.name}': {enc_err}")
             continue
 
     # Final fallback replacing invalid characters
@@ -111,8 +116,8 @@ def get_csv_metadata(file_path: str | Path) -> Dict[str, Any]:
         # Fast line count
         with open(p, "rb") as f:
             rows = max(0, sum(1 for _ in f) - 1)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Error extracting CSV metadata for {p.name}: {e}", exc_info=True)
 
     return {
         "file_name": p.name,
@@ -148,8 +153,8 @@ def get_excel_metadata(file_path: str | Path) -> Dict[str, Any]:
                 total_rows = ws.max_row or 0
                 total_cols = ws.max_column or 0
             wb.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"openpyxl failed to read Excel metadata for {p.name}: {e}", exc_info=True)
 
     if not sheet_names:
         try:
@@ -158,8 +163,8 @@ def get_excel_metadata(file_path: str | Path) -> Dict[str, Any]:
             df = xl.parse(sheet_names[0], nrows=5)
             total_rows = len(df)
             total_cols = len(df.columns)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"pandas fallback failed to read Excel metadata for {p.name}: {e}", exc_info=True)
 
     return {
         "file_name": p.name,
@@ -332,18 +337,73 @@ class DataConverter:
         output_path: str | Path,
         sheet_name: Optional[str] = None,
     ) -> Path:
-        """Convert Excel sheet to printable PDF table report."""
-        if not self.has_reportlab:
-            raise RuntimeError("reportlab is required for PDF table generation.")
-
+        """Convert Excel sheet to printable PDF report natively via COM."""
         in_p = Path(xlsx_path).resolve()
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        target_sheet = sheet_name or 0
-        df = pd.read_excel(str(in_p), sheet_name=target_sheet)
-        sheet_title = f"{in_p.stem} - {sheet_name}" if sheet_name else in_p.stem
-        return self._dataframe_to_pdf(df, out_p, sheet_title)
+        if os.name == "nt":
+            import time
+            from image_converter.core.com_utils import (
+                com_initialized,
+                EXCEL_ALERTS_NONE,
+                MSO_AUTOMATION_SECURITY_FORCE_DISABLE,
+                XL_TYPE_PDF,
+            )
+            with com_initialized():
+                import win32com.client
+                try:
+                    excel = win32com.client.DispatchEx("Excel.Application")
+                except Exception as dispatch_err:
+                    logger.warning(f"Excel COM not available: {dispatch_err}")
+                    excel = None
+
+                if excel is not None:
+                    try:
+                        excel.Visible = False
+                        excel.DisplayAlerts = EXCEL_ALERTS_NONE
+                        excel.AutomationSecurity = MSO_AUTOMATION_SECURITY_FORCE_DISABLE
+                        wb = None
+                        tmp_out = out_p.with_name(f"{out_p.stem}_tmp_{os.getpid()}_{time.time_ns()}.pdf")
+                        try:
+                            try:
+                                wb = excel.Workbooks.Open(str(in_p), ReadOnly=True)
+                                if sheet_name:
+                                    ws = wb.Sheets(sheet_name)
+                                    ws.ExportAsFixedFormat(XL_TYPE_PDF, str(tmp_out))
+                                else:
+                                    wb.ExportAsFixedFormat(XL_TYPE_PDF, str(tmp_out))
+                            finally:
+                                if wb is not None:
+                                    try:
+                                        wb.Close(False)
+                                    except Exception as close_err:
+                                        logger.warning(f"Error closing Excel workbook: {close_err}")
+                            if tmp_out.is_file() and tmp_out.stat().st_size > 0:
+                                os.replace(tmp_out, out_p)
+                        finally:
+                            if tmp_out.exists():
+                                try:
+                                    tmp_out.unlink()
+                                except Exception as unlink_err:
+                                    logger.warning(f"Could not remove temporary file {tmp_out}: {unlink_err}")
+                    except Exception as e:
+                        logger.warning(f"MS Excel COM conversion failed for {in_p.name}: {e}", exc_info=True)
+                        raise RuntimeError(f"Microsoft Excel conversion failed for '{in_p.name}': {e}") from e
+                    finally:
+                        ws = None
+                        wb = None
+                        try:
+                            excel.Quit()
+                        except Exception as quit_err:
+                            logger.warning(f"Error quitting Excel application: {quit_err}")
+                        excel = None
+                        import gc
+                        gc.collect()
+                    if out_p.is_file() and out_p.stat().st_size > 0:
+                        return out_p
+
+        raise RuntimeError("Native Excel to PDF conversion requires Microsoft Excel on Windows.")
 
     def convert_excel_to_json(
         self,

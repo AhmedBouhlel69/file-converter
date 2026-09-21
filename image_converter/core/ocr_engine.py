@@ -5,12 +5,15 @@ Uses pytesseract and PyMuPDF to extract text from scanned PDFs and images.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional, Union
 
 import fitz  # PyMuPDF
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 _PYTESSERACT_AVAILABLE = False
 try:
@@ -30,7 +33,8 @@ def is_ocr_available() -> bool:
     try:
         pytesseract.get_tesseract_version()
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Tesseract version check failed: {e}")
         return False
 
 
@@ -42,6 +46,7 @@ def get_ocr_status_message() -> str:
         ver = pytesseract.get_tesseract_version()
         return f"Tesseract OCR is available (version {ver})."
     except Exception as e:
+        logger.info(f"Tesseract executable not found on PATH: {e}")
         return (
             "pytesseract is installed, but the Tesseract OCR executable was not found on PATH. "
             "Please install Tesseract-OCR (e.g., via winget install UB-Mannheim.TesseractOCR on Windows "

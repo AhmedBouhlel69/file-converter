@@ -5,10 +5,13 @@ Guards against path traversal, zip bombs, corrupted headers, and oversized files
 
 from __future__ import annotations
 
+import logging
 import os
 import zipfile
 from pathlib import Path
 from typing import Optional, Set
+
+logger = logging.getLogger(__name__)
 
 
 class SecurityError(Exception):
@@ -192,8 +195,8 @@ def validate_input_file(
                         raise ValueError(f"{ext.lstrip('.').upper()} document is encrypted / password-protected.")
         except ValueError:
             raise
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error checking encryption header for {p.name}: {e}", exc_info=True)
 
         sniffed = sniff_file_type(p)
         if sniffed != "ZIP":

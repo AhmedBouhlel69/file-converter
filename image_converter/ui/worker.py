@@ -3,6 +3,7 @@ Background QThread worker for responsive batch conversions.
 """
 
 import time
+import logging
 from pathlib import Path
 from typing import List, Tuple
 
@@ -13,6 +14,8 @@ from image_converter.core.engine import (
     ConversionResult,
     ImageConverterEngine,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BatchConversionWorker(QThread):
@@ -82,6 +85,7 @@ class BatchConversionWorker(QThread):
                 cancel_check=lambda: self._is_cancelled,
             )
         except Exception as batch_err:
+            logger.error(f"Catastrophic batch conversion error in UI worker: {batch_err}", exc_info=True)
             # Handle catastrophic failure gracefully
             fail_count += (total - success_count - fail_count)
             err_res = ConversionResult(
