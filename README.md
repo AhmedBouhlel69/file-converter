@@ -39,8 +39,8 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), OpenDocumen
 ## 🚀 Key Features
 
 - **Multi-Category File Conversion**:
-  - **Documents**: Convert **PDF** to high-res images, Word (`.docx`), plain text, and extract data tables into Excel/CSV. Convert **Word (`.docx`)** to printable PDF, formatted text, HTML, ODT, RTF, PPTX, and images.
-  - **Presentations & Rich Docs**: Convert **PowerPoint (`.pptx`)** to PDF slides, responsive HTML presentations, text, and PNG images. Convert **OpenDocument (`.odt`)** and **Rich Text (`.rtf`)** to PDF, Word (`.docx`), and text.
+  - **Documents**: Convert **PDF** to high-res images, Word (`.docx`), plain text, and extract data tables into Excel/CSV. Convert **Word (`.docx`)** to printable PDF, formatted text, HTML, ODT, RTF, and images.
+  - **Presentations & Rich Docs**: Convert **PowerPoint (`.pptx`)** to PDF slides, responsive HTML presentations, text, and images. Convert **OpenDocument (`.odt`)** and **Rich Text (`.rtf`)** to PDF, Word (`.docx`), and text.
   - **Spreadsheets & Data**: Convert **CSV** (UTF-8, UTF-16, CP1252, Latin-1) to styled Excel workbooks (`.xlsx`), printable PDF tables, JSON, and responsive HTML. Convert **Excel (`.xlsx`)** to CSV, PDF reports, JSON, and HTML.
   - **Images**: Batch convert, resize, and compress between **HEIC, JPG, PNG, WEBP, BMP, TIFF, GIF, ICO, and PDF**.
 - **Image Compression Workspace**:
@@ -52,17 +52,17 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), OpenDocumen
   - **Split**: Extract exact page ranges or burst documents into individual single-page files with strict range validation.
   - **Organize**: Visually reorder, rotate, extract, or delete pages while preserving hierarchical outline/bookmark trees.
   - **Compress**: Multi-stage PDF optimization (stream deflation, duplicate font/image consolidation) with an automatic fallback guard that guarantees output files never exceed source size.
-- **Enterprise Office COM Integration (Windows)**:
+  - **Enterprise Office COM Integration (Windows)**:
   - High-fidelity Office conversions powered by native COM automation with thread-isolated `CoInitialize`/`CoUninitialize`.
   - Hardened with `DisplayAlerts` suppression, `AutomationSecurity` macro blocking, and serialized access locks (`_ppt_com_lock`) for single-instance PowerPoint servers.
-  - Graceful pure-Python headless fallbacks for cross-platform environments without Microsoft Office.
+  - Pure-Python paths remain available where implemented; DOCX/XLSX/PPTX-to-PDF and RTF/ODT-to-PDF require Microsoft Office on Windows.
 - **Privacy & Complete Metadata Deletion**:
   - **Images**: Strip all EXIF tags, GPS location data, camera make/model/serial numbers, IPTC profiles, and user comments.
   - **PDF Documents**: Strip title, author, subject, creator, producer, creation/modification timestamps, and embedded Adobe XMP XML packets.
   - **Office Documents**: Clean author, last modified by, company, keywords, comments, and revision histories from `.docx`, `.xlsx`, `.pptx`, and `.odt`.
   - **Live Privacy Badge**: Automatic metadata scanning in the GUI (`⚠️ Has metadata` / `🛡️ Clean`).
 - **OCR Engine (Optical Character Recognition)**:
-  - Extract text and convert scanned PDFs and images directly to searchable Text and Word documents via Tesseract OCR (`--ocr` flag or GUI toggle).
+  - Extract searchable text from scanned PDFs and images via Tesseract OCR (`--ocr` flag or GUI toggle). Image-to-DOCX creates a document containing the source image; it does not produce editable OCR text.
 - **Integrity & Security Hardening**:
   - **Single False-Success Gate**: All conversions pass through `_verify_and_create_result`. Empty or 0-byte outputs are immediately unlinked and returned as failures.
   - **Atomic File Operations**: Outputs are written to isolated temporary files (`.tmp_*`) and atomically swapped via `os.replace` to prevent corrupted partial writes.
@@ -76,15 +76,15 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), OpenDocumen
 
 | Input Format | Category | Target Output Formats |
 | :--- | :--- | :--- |
-| **PDF** (`.pdf`) | Document | `PNG`, `JPG`, `WEBP`, `DOCX`, `TXT`, `CSV`, `XLSX`, `PPTX` |
-| **Word** (`.docx`, `.doc`) | Document | `PDF`, `TXT`, `HTML`, `PNG`, `JPG`, `WEBP`, `ODT`, `RTF`, `PPTX` |
-| **PowerPoint** (`.pptx`) | Presentation | `PDF`, `TXT`, `HTML`, `PNG`, `JPG`, `WEBP`, `DOCX` |
+| **PDF** (`.pdf`) | Document | `PNG`, `JPG`, `WEBP`, `DOCX`, `TXT`, `CSV`, `XLSX` |
+| **Word** (`.docx`, `.doc`) | Document | `PDF`, `TXT`, `HTML`, `PNG`, `JPG`, `WEBP`, `ODT`, `RTF` |
+| **PowerPoint** (`.pptx`) | Presentation | `PDF`, `TXT`, `HTML`, `PNG`, `JPG`, `WEBP` |
 | **OpenDocument** (`.odt`) | Document | `PDF`, `DOCX`, `TXT`, `RTF` |
 | **Rich Text** (`.rtf`) | Document | `PDF`, `DOCX`, `TXT`, `ODT` |
 | **Plain Text** (`.txt`) | Text | `PDF`, `DOCX`, `PPTX`, `RTF`, `HTML` |
 | **CSV** (`.csv`) | Spreadsheet | `XLSX`, `PDF`, `JSON`, `HTML`, `TXT` |
 | **Excel** (`.xlsx`, `.xls`) | Spreadsheet | `CSV`, `PDF`, `JSON`, `HTML` |
-| **Images** (HEIC, JPG, PNG, etc.) | Image | `JPG`, `PNG`, `WEBP`, `HEIC`, `BMP`, `TIFF`, `GIF`, `ICO`, `PDF`, `TXT` (OCR), `DOCX` (OCR) |
+| **Images** (HEIC, JPG, PNG, WEBP, BMP, TIFF, GIF, ICO, PPM, TGA, EPS) | Image | `JPG`, `PNG`, `WEBP`, `HEIC`, `BMP`, `TIFF`, `GIF`, `ICO`, `PDF`, `TXT` (OCR), `DOCX` (embedded image) |
 
 ---
 
@@ -126,6 +126,8 @@ python launch_converter.py -i ./photos -f WEBP -q 75 --width 1920 --height 1920 
 ### Prerequisites
 - **Python 3.10+** (tested on Python 3.10 through 3.14)
 - Windows, macOS, or Linux (Native Microsoft Office COM features require Windows + Office installed)
+- Optional Windows Office automation: install Microsoft Office and the `pywin32` package (`python -m pip install pywin32`).
+- Optional OCR: install the Tesseract OCR engine; see the FAQ below.
 
 ### Setup Virtual Environment
 
@@ -299,7 +301,7 @@ python launch_converter.py -i logo.png -o favicon.ico
 # Extract text from a scanned PDF page using Tesseract OCR fallback
 python launch_converter.py -i scanned_doc.pdf -o searchable.txt --ocr
 
-# Convert receipt scan directly to editable Word (.docx) document
+# Place a receipt scan inside a Word (.docx) document
 python launch_converter.py -i receipt_scan.jpg -o document.docx --ocr
 ```
 
@@ -370,14 +372,14 @@ python launch_converter.py -i ./photos -f WEBP -q 85 -o ./optimized_webp -r
    - **Compress Dialog**: Select compression presets (Screen 72 DPI, eBook 150 DPI, Print 300 DPI) and preview size reduction with safe fallback protection.
 3. **Dedicated Image Tools Workspace**:
    - **Compress Images**: Batch image compression with output format, quality, resize bounds, destination folder, and metadata stripping controls.
-   - Queue context menu integration lets image rows jump straight into compression.
+  - Queue context menu integration lets image rows jump straight into compression.
 4. **Interactive File Preview & Privacy Badges**:
    - First-page rendering for PDFs and image previews with color mode and dimensions.
    - Document summaries (paragraph, table, slide, and word counts).
    - Live privacy badge inspects file metadata and alerts user (`⚠️ Has metadata` / `🛡️ Clean`).
 5. **Queue Management & Thread Worker**:
    - Background `QThread` execution ensures the UI never hangs or freezes during heavy conversions.
-   - Instant mid-batch cancellation cleanly aborts remaining tasks.
+  - Cancellation stops queued work after the current conversion completes.
 
 ---
 
@@ -441,17 +443,17 @@ results = engine.convert_batch(tasks, progress_callback=on_progress, max_workers
 
 ## 🧪 Testing & Quality Assurance
 
-The repository features an exhaustive **311-test automated verification suite** covering every layer of the architecture:
+The repository includes an automated pytest suite covering conversion, security, metadata, CLI, concurrency, and GUI behavior:
 
 ```powershell
-# Run the full 311-test suite
+# Run the full test suite
 .\venv\Scripts\python -m pytest -q
 
 # Run specific functional test suites
 pytest image_converter/tests/test_pdf_tools.py -v         # PDF merge, split, organize, compress
 pytest image_converter/tests/test_documents.py -v         # PDF & DOCX conversion pipelines
 pytest image_converter/tests/test_com_automation.py -v    # COM thread safety, constants & security
-pytest image_converter/tests/test_office_integration.py -v# Multi-threaded Office concurrency & failure tests
+pytest image_converter/tests/test_office_integration.py -v  # Multi-threaded Office concurrency & failure tests
 pytest image_converter/tests/test_qa_audit.py -v          # Full QA audit across all formats
 pytest image_converter/tests/test_tool_dialogs.py -v      # GUI tool dialogs (offscreen)
 pytest image_converter/tests/test_security.py -v          # Zip-bomb, path traversal, magic bytes
@@ -465,6 +467,8 @@ pytest image_converter/tests/test_security.py -v          # Zip-bomb, path trave
 ---
 
 ## 🏗️ Architecture & Security Hardening
+
+For a fuller service-level architecture overview, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```
 file converter/
@@ -502,13 +506,16 @@ file converter/
 │   │   ├── assets/              # UI brand assets (app_icon.ico, app_icon.png)
 │   │   ├── main_window.py       # Main application window & toolbar integration
 │   │   ├── tool_dialogs.py      # Dedicated dialogs (Merge, Split, Organize, Compress)
+│   │   ├── pdf_tools_page.py    # PDF tools workspace
+│   │   ├── image_tools_page.py  # Image compression workspace
+│   │   ├── queue_model.py       # Conversion queue state model
 │   │   ├── components.py        # DropZone, Preview, Settings, QueueTable
 │   │   ├── nav_rail.py          # Left navigation bar
 │   │   ├── stats_widget.py      # Conversion statistics cards
 │   │   ├── theme.py             # Modern Dark Mode CSS stylesheet
 │   │   └── worker.py            # Background QThread for non-blocking conversion
 │   │
-│   └── tests/                   # 311-Test Automated Verification Suite
+│   └── tests/                   # Automated pytest suite
 │       ├── conftest.py          # Pytest fixtures and Office test markers
 │       ├── test_engine.py       # Core image engine & false-success gate tests
 │       ├── test_pdf_tools.py    # PDF merge, split, organize, compress invariant tests
@@ -540,7 +547,7 @@ Then pass `--ocr` in the CLI or check "Enable OCR Text Fallback" in the GUI.
 
 ### 2. When is Microsoft Office used vs. Pure-Python Headless mode?
 - **On Windows with Microsoft Office installed**: DOCX $\rightarrow$ PDF, PPTX $\rightarrow$ PDF, XLSX $\rightarrow$ PDF, and RTF/ODT $\rightarrow$ PDF leverage native Microsoft Office COM automation. This guarantees 100% visual fidelity, preserving exact fonts, page layouts, table formatting, and complex vector shapes. All COM calls run within isolated thread contexts with macro suppression and automatic process termination.
-- **On non-Windows platforms or machines without Office**: Conversions fall back cleanly to pure-Python headless libraries (`reportlab`, `python-docx`, `python-pptx`, `pdf2docx`, `openpyxl`).
+- **On non-Windows platforms or machines without Office**: Office-dependent PDF exports are unavailable and return a conversion failure. Other implemented routes use the available pure-Python libraries (`reportlab`, `python-docx`, `python-pptx`, `pdf2docx`, `openpyxl`).
 
 ### 3. How does the PDF compressor guarantee files never grow larger?
 `compress_pdf` applies progressive optimization passes (deflate streams, image downsampling, font/metadata cleanup). Before finalizing, it measures the output size against the original input. If the optimized file is equal to or larger than the source, it automatically replaces the output with a bit-identical copy of the source, guaranteeing that `output_size <= input_size` under all circumstances.
