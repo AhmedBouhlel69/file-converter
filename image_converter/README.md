@@ -13,6 +13,10 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), CSV**, and **Images (HEIC, JPG
   - **Presentations & Rich Docs**: PowerPoint (`.pptx`), OpenDocument (`.odt`), Rich Text (`.rtf`)
   - **Spreadsheets & Data**: CSV (UTF-8, UTF-16, CP1252, Latin-1), Excel (`.xlsx`, `.xls`), JSON, HTML
   - **Images**: HEIC, HEIF, JPG, JPEG, PNG, WEBP, BMP, TIFF, GIF, ICO, PPM, TGA, EPS
+- **Image Compression**:
+  - Desktop Image Tools workspace for batch compression to WebP, JPG, PNG, or original format.
+  - Quality slider, max-width/max-height resize controls, custom output folder, and optional metadata stripping.
+  - CLI compression through the existing `-q`, `--width`, `--height`, and `-f WEBP` options.
 - **Privacy & Complete Metadata Deletion**:
   - Strip all EXIF tags, GPS location, camera details, and comments from images (`.jpg`, `.png`, `.webp`, `.heic`, `.tiff`, `.bmp`).
   - Strip author, title, producer, timestamps, and embedded XMP streams from PDFs.
@@ -76,6 +80,12 @@ Double click `launch_converter.bat`, or run from terminal:
 
 # Convert HEIC photo to WebP
 .\venv\Scripts\python.exe launch_converter.py -i photo.heic -o photo.webp -q 85 --resize-percent 50
+
+# Compress a photo to WebP with resize bounds
+.\venv\Scripts\python.exe launch_converter.py -i photo.jpg -o photo_compressed.webp -q 75 --width 1920 --height 1920
+
+# Batch-compress a folder of images
+.\venv\Scripts\python.exe launch_converter.py -i ./photos -f WEBP -q 75 --width 1920 --height 1920 -r -o ./compressed
 
 # Batch convert an entire folder to PDF
 .\venv\Scripts\python.exe launch_converter.py -i ./docs_and_images -f PDF -o ./all_pdfs

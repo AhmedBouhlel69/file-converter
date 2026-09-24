@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import pytest
 import fitz
+from PIL import Image
 from PySide6.QtWidgets import QApplication, QMessageBox, QFileDialog
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -203,4 +204,34 @@ def test_compress_dialog_already_optimal_reports_no_reduction(qapp, tmp_path: Pa
     assert title == "No Reduction Achieved"
     assert "No reduction was achieved" in text
     assert "Original file preserved" in text
-    assert "ℹ️ No reduction was achieved" in dlg.lbl_result.text()
+    assert "Note: No reduction was achieved" in dlg.lbl_result.text()
+
+
+def test_image_compress_dialog_creates_smaller_webp(qapp, tmp_path: Path, monkeypatch):
+    from image_converter.ui.tool_dialogs import ImageCompressDialog
+
+    source = tmp_path / "large_photo.jpg"
+    image = Image.effect_noise((900, 700), 80).convert("RGB")
+    image.save(source, format="JPEG", quality=95)
+
+    out_dir = tmp_path / "compressed"
+    info_messages = []
+    crit_messages = []
+    monkeypatch.setattr(QMessageBox, "information", lambda parent, title, text, *args, **kwargs: info_messages.append((title, text)) or QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox, "critical", lambda parent, title, text, *args, **kwargs: crit_messages.append((title, text)))
+
+    dlg = ImageCompressDialog(initial_files=[source])
+    dlg.txt_output_dir.setText(str(out_dir))
+    dlg.combo_format.setCurrentText("WEBP")
+    dlg.slider_quality.setValue(55)
+    dlg.spin_max_width.setValue(600)
+    dlg.spin_max_height.setValue(600)
+
+    dlg._execute_compress()
+
+    output = out_dir / "large_photo_compressed.webp"
+    assert not crit_messages
+    assert len(info_messages) == 1
+    assert output.exists()
+    assert output.stat().st_size < source.stat().st_size
+    assert "Complete:" in dlg.lbl_result.text()

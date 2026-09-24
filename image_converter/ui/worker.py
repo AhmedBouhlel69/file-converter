@@ -79,6 +79,8 @@ class BatchConversionWorker(QThread):
             self.progress_updated.emit(completed_count, total_count, pct)
 
         try:
+            for index, (input_path, _, _) in enumerate(self.tasks):
+                self.file_started.emit(index, Path(input_path).name)
             self.engine.convert_batch(
                 self.tasks,
                 progress_callback=on_task_progress,

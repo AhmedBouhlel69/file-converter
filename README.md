@@ -11,6 +11,7 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), OpenDocumen
 - [Key Features](#-key-features)
 - [Supported Formats & Conversion Matrix](#-supported-formats--conversion-matrix)
 - [PDF Tools & Utilities](#-pdf-tools--utilities)
+- [Image Tools & Compression](#image-tools--compression)
 - [Installation & Quick Start](#-installation--quick-start)
   - [Prerequisites](#prerequisites)
   - [Setup Virtual Environment](#setup-virtual-environment)
@@ -41,7 +42,11 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), OpenDocumen
   - **Documents**: Convert **PDF** to high-res images, Word (`.docx`), plain text, and extract data tables into Excel/CSV. Convert **Word (`.docx`)** to printable PDF, formatted text, HTML, ODT, RTF, PPTX, and images.
   - **Presentations & Rich Docs**: Convert **PowerPoint (`.pptx`)** to PDF slides, responsive HTML presentations, text, and PNG images. Convert **OpenDocument (`.odt`)** and **Rich Text (`.rtf`)** to PDF, Word (`.docx`), and text.
   - **Spreadsheets & Data**: Convert **CSV** (UTF-8, UTF-16, CP1252, Latin-1) to styled Excel workbooks (`.xlsx`), printable PDF tables, JSON, and responsive HTML. Convert **Excel (`.xlsx`)** to CSV, PDF reports, JSON, and HTML.
-  - **Images**: Batch convert and resize between **HEIC, JPG, PNG, WEBP, BMP, TIFF, GIF, ICO, and PDF**.
+  - **Images**: Batch convert, resize, and compress between **HEIC, JPG, PNG, WEBP, BMP, TIFF, GIF, ICO, and PDF**.
+- **Image Compression Workspace**:
+  - Compress batches of images to WebP, JPG, PNG, or their original format with quality and max-dimension controls.
+  - Optionally strip metadata from compressed copies and keep original source files untouched.
+  - Reuses the same hardened conversion engine, output validation, and local-only processing as normal image conversion.
 - **Native PDF Toolkit**:
   - **Merge**: Combine multiple PDFs and images into a single cohesive PDF with optional hierarchical bookmark/TOC generation and atomic writes.
   - **Split**: Extract exact page ranges or burst documents into individual single-page files with strict range validation.
@@ -93,6 +98,26 @@ Universal File Converter provides specialized tools for direct PDF manipulation:
 | **Split PDF** | Break PDFs into parts or pages | Supports ranges (`1-3,5`), burst mode, rejects out-of-bound pages |
 | **Organize Pages** | Reorder, delete, and rotate pages | Full hierarchical outline/TOC preservation, index validation |
 | **Compress PDF** | Reduce PDF file size | Lossless & lossy stream optimization, font deduplication, fallback guard |
+
+---
+
+## 🖼️ Image Tools & Compression
+
+The desktop app includes a dedicated **Image Tools** workspace for reducing image file size without changing originals.
+
+| Tool | Functionality | Key Features |
+| :--- | :--- | :--- |
+| **Compress Images** | Shrink photos, screenshots, and graphics | WebP/JPG/PNG/original-format output, quality slider, max-width/max-height resize, metadata stripping |
+
+CLI users can use the same compression path through image conversion quality and resize options:
+
+```powershell
+# WebP compression with quality and max bounds
+python launch_converter.py -i photo.jpg -o photo.webp -q 75 --width 1920 --height 1920
+
+# Batch image compression to WebP
+python launch_converter.py -i ./photos -f WEBP -q 75 --width 1920 --height 1920 -r -o ./compressed
+```
 
 ---
 
@@ -343,11 +368,14 @@ python launch_converter.py -i ./photos -f WEBP -q 85 -o ./optimized_webp -r
    - **Split Dialog**: Extract page ranges (`1-5, 8`) or burst into individual pages with real-time range validation.
    - **Organize Dialog**: Interactive visual page grid to reorder, rotate (90° clockwise/counter-clockwise), or delete pages.
    - **Compress Dialog**: Select compression presets (Screen 72 DPI, eBook 150 DPI, Print 300 DPI) and preview size reduction with safe fallback protection.
-3. **Interactive File Preview & Privacy Badges**:
+3. **Dedicated Image Tools Workspace**:
+   - **Compress Images**: Batch image compression with output format, quality, resize bounds, destination folder, and metadata stripping controls.
+   - Queue context menu integration lets image rows jump straight into compression.
+4. **Interactive File Preview & Privacy Badges**:
    - First-page rendering for PDFs and image previews with color mode and dimensions.
    - Document summaries (paragraph, table, slide, and word counts).
    - Live privacy badge inspects file metadata and alerts user (`⚠️ Has metadata` / `🛡️ Clean`).
-4. **Queue Management & Thread Worker**:
+5. **Queue Management & Thread Worker**:
    - Background `QThread` execution ensures the UI never hangs or freezes during heavy conversions.
    - Instant mid-batch cancellation cleanly aborts remaining tasks.
 

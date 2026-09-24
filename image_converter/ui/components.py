@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 import fitz  # PyMuPDF
 from PIL import Image
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPixmap, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -51,6 +51,7 @@ from image_converter.core.engine import (
     get_image_metadata,
     get_supported_output_formats,
 )
+from image_converter.ui.theme import icon, repolish, set_variant
 
 
 def get_compatible_output_formats(file_path_or_ext: str | Path) -> List[str]:
@@ -148,11 +149,13 @@ class DropZoneWidget(QFrame):
         super().__init__(parent)
         self.setObjectName("DropZone")
         self.setAcceptDrops(True)
+        self.setProperty("dragActive", False)
+        self.setAccessibleName("File drop zone")
         self._is_collapsed = False
 
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(14, 10, 14, 10)
-        self.main_layout.setSpacing(6)
+        self.main_layout.setContentsMargins(16, 12, 16, 12)
+        self.main_layout.setSpacing(7)
         self.main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Full view content
@@ -162,11 +165,20 @@ class DropZoneWidget(QFrame):
         full_layout.setSpacing(6)
         full_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.title_lbl = QLabel("📁 Drag & Drop Files or Folders Here")
-        self.title_lbl.setStyleSheet("font-size: 15px; font-weight: 600; color: #cbd5e1;")
+        self.upload_icon = QLabel()
+        self.upload_icon.setPixmap(icon("upload").pixmap(52, 52))
+        self.upload_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.upload_icon.setAccessibleName("Upload files")
+
+        drop_kicker = QLabel("DROP ZONE")
+        drop_kicker.setObjectName("Eyebrow")
+        drop_kicker.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.title_lbl = QLabel("Drop files or folders anywhere in this area")
+        self.title_lbl.setObjectName("SectionTitle")
         self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.sub_lbl = QLabel("Supports PDF, Word (.docx), Excel (.xlsx), CSV, Presentations, Text, and Images")
+        self.sub_lbl = QLabel("Images, PDFs, documents, spreadsheets, presentations, and text")
         self.sub_lbl.setObjectName("MutedLabel")
         self.sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -174,17 +186,19 @@ class DropZoneWidget(QFrame):
         btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         btn_layout.setSpacing(10)
 
-        self.btn_browse_files = QPushButton("Browse Files...")
-        self.btn_browse_files.setObjectName("SecondaryButton")
+        self.btn_browse_files = QPushButton("Choose files")
+        set_variant(self.btn_browse_files, "secondary")
         self.btn_browse_files.clicked.connect(self._browse_files)
 
-        self.btn_browse_folder = QPushButton("Browse Folder...")
-        self.btn_browse_folder.setObjectName("SecondaryButton")
+        self.btn_browse_folder = QPushButton("Choose folder")
+        set_variant(self.btn_browse_folder, "ghost")
         self.btn_browse_folder.clicked.connect(self._browse_folder)
 
         btn_layout.addWidget(self.btn_browse_files)
         btn_layout.addWidget(self.btn_browse_folder)
 
+        full_layout.addWidget(self.upload_icon)
+        full_layout.addWidget(drop_kicker)
         full_layout.addWidget(self.title_lbl)
         full_layout.addWidget(self.sub_lbl)
         full_layout.addLayout(btn_layout)
@@ -196,19 +210,19 @@ class DropZoneWidget(QFrame):
         compact_layout.setContentsMargins(4, 0, 4, 0)
         compact_layout.setSpacing(12)
 
-        self.compact_lbl = QLabel("📥 Drag & drop additional files here, or click to add")
-        self.compact_lbl.setStyleSheet("font-weight: 500; color: #94a3b8; font-size: 12px;")
+        self.compact_lbl = QLabel("Drop more files here")
+        self.compact_lbl.setObjectName("MutedLabel")
         compact_layout.addWidget(self.compact_lbl)
         compact_layout.addStretch()
 
-        self.btn_compact_add = QPushButton("➕ Add Files")
-        self.btn_compact_add.setObjectName("SecondaryButton")
+        self.btn_compact_add = QPushButton("+  Add more")
+        set_variant(self.btn_compact_add, "ghost")
         self.btn_compact_add.clicked.connect(self._browse_files)
         compact_layout.addWidget(self.btn_compact_add)
 
         self.main_layout.addWidget(self.compact_container)
         self.compact_container.setVisible(False)
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(126)
 
     def set_collapsed(self, collapsed: bool):
         self._is_collapsed = collapsed
@@ -218,19 +232,19 @@ class DropZoneWidget(QFrame):
             self.setMinimumHeight(44)
             self.setMaximumHeight(48)
         else:
-            self.setMinimumHeight(110)
+            self.setMinimumHeight(126)
             self.setMaximumHeight(16777215)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            self.setStyleSheet("QFrame#DropZone { border-color: #818cf8; background-color: #1f2537; }")
+            self._set_drag_active(True)
 
     def dragLeaveEvent(self, event):
-        self.setStyleSheet("")
+        self._set_drag_active(False)
 
     def dropEvent(self, event):
-        self.setStyleSheet("")
+        self._set_drag_active(False)
         urls = event.mimeData().urls()
         all_paths: List[Path] = []
 
@@ -242,6 +256,12 @@ class DropZoneWidget(QFrame):
         if all_paths:
             self.files_added.emit(all_paths)
         event.acceptProposedAction()
+
+    def _set_drag_active(self, active: bool):
+        self.setProperty("dragActive", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
     def _browse_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -271,55 +291,57 @@ class ImagePreviewWidget(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("CardFrame")
-        self.setMinimumWidth(260)
-        self.setMaximumWidth(360)
+        self.setObjectName("InspectorContent")
+        self.setMinimumWidth(0)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(10)
 
-        title = QLabel("FILE PREVIEW")
+        title = QLabel("File inspector")
         title.setObjectName("SectionTitle")
         layout.addWidget(title)
+        subtitle = QLabel("Select a queue item to preview it and review its metadata.")
+        subtitle.setObjectName("MutedLabel")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
 
         # Image canvas / preview area
         self.preview_lbl = QLabel()
+        self.preview_lbl.setObjectName("InnerCard")
         self.preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_lbl.setMinimumHeight(200)
-        self.preview_lbl.setStyleSheet(
-            "background-color: #12141c; border-radius: 8px; border: 1px solid #232734; padding: 10px; color: #94a3b8;"
-        )
+        self.preview_lbl.setMargin(10)
         self.preview_lbl.setWordWrap(True)
-        self.preview_lbl.setText("Select a file to preview")
+        self.preview_lbl.setText("No file selected\n\nChoose a row in the conversion queue.")
         layout.addWidget(self.preview_lbl)
 
         # Metadata info box
         self.info_frame = QFrame()
-        self.info_frame.setStyleSheet("background-color: #161922; border-radius: 6px; padding: 8px;")
+        self.info_frame.setObjectName("InnerCard")
         info_layout = QGridLayout(self.info_frame)
         info_layout.setContentsMargins(8, 8, 8, 8)
         info_layout.setSpacing(6)
 
-        info_layout.addWidget(QLabel("File Name:"), 0, 0)
+        info_layout.addWidget(QLabel("Name"), 0, 0)
         self.lbl_name = QLabel("-")
         self.lbl_name.setWordWrap(True)
-        self.lbl_name.setStyleSheet("font-weight: 600; color: #f3f4f6;")
+        self.lbl_name.setObjectName("SectionTitle")
         info_layout.addWidget(self.lbl_name, 0, 1)
 
-        info_layout.addWidget(QLabel("Dimensions / Count:"), 1, 0)
+        info_layout.addWidget(QLabel("Details"), 1, 0)
         self.lbl_dim = QLabel("-")
         info_layout.addWidget(self.lbl_dim, 1, 1)
 
-        info_layout.addWidget(QLabel("Format / Type:"), 2, 0)
+        info_layout.addWidget(QLabel("Type"), 2, 0)
         self.lbl_format = QLabel("-")
         info_layout.addWidget(self.lbl_format, 2, 1)
 
-        info_layout.addWidget(QLabel("File Size:"), 3, 0)
+        info_layout.addWidget(QLabel("Size"), 3, 0)
         self.lbl_size = QLabel("-")
         info_layout.addWidget(self.lbl_size, 3, 1)
 
-        info_layout.addWidget(QLabel("Privacy / Meta:"), 4, 0)
+        info_layout.addWidget(QLabel("Metadata"), 4, 0)
         self.lbl_meta_privacy = QLabel("-")
         self.lbl_meta_privacy.setWordWrap(True)
         info_layout.addWidget(self.lbl_meta_privacy, 4, 1)
@@ -332,13 +354,13 @@ class ImagePreviewWidget(QFrame):
         action_layout = QHBoxLayout()
         action_layout.setSpacing(8)
 
-        self.btn_open_location = QPushButton("📂 Open Location")
-        self.btn_open_location.setObjectName("SecondaryButton")
+        self.btn_open_location = QPushButton("Open folder")
+        set_variant(self.btn_open_location, "secondary")
         self.btn_open_location.setEnabled(False)
         self.btn_open_location.clicked.connect(self._open_file_location)
 
-        self.btn_copy_path = QPushButton("📋 Copy Path")
-        self.btn_copy_path.setObjectName("SecondaryButton")
+        self.btn_copy_path = QPushButton("Copy path")
+        set_variant(self.btn_copy_path, "ghost")
         self.btn_copy_path.setEnabled(False)
         self.btn_copy_path.clicked.connect(self._copy_path_to_clipboard)
 
@@ -383,15 +405,17 @@ class ImagePreviewWidget(QFrame):
             d_meta = get_detailed_metadata(p)
             if d_meta.get("has_metadata"):
                 warn_str = f" ({d_meta['warnings'][0]})" if d_meta.get("warnings") else ""
-                self.lbl_meta_privacy.setText(f"⚠️ Has metadata{warn_str}")
-                self.lbl_meta_privacy.setStyleSheet("color: #fbbf24; font-weight: 500;")
+                self.lbl_meta_privacy.setText(f"Has metadata{warn_str}")
+                self.lbl_meta_privacy.setProperty("state", "warning")
             else:
-                self.lbl_meta_privacy.setText("🛡️ Clean (No tracking tags)")
-                self.lbl_meta_privacy.setStyleSheet("color: #34d399; font-weight: 500;")
+                self.lbl_meta_privacy.setText("Clean (no tracking tags)")
+                self.lbl_meta_privacy.setProperty("state", "success")
+            repolish(self.lbl_meta_privacy)
         except Exception as meta_err:
             logger.debug(f"Could not load metadata privacy info for preview of {p.name}: {meta_err}")
             self.lbl_meta_privacy.setText("-")
-            self.lbl_meta_privacy.setStyleSheet("")
+            self.lbl_meta_privacy.setProperty("state", "")
+            repolish(self.lbl_meta_privacy)
 
         try:
             meta = get_file_metadata(p)
@@ -412,7 +436,7 @@ class ImagePreviewWidget(QFrame):
                     doc.close()
                 except Exception as pdf_err:
                     logger.debug(f"PDF thumbnail preview failed for {p.name}: {pdf_err}")
-                    self.preview_lbl.setText("📄 PDF Document\n(Preview unavailable)")
+                    self.preview_lbl.setText("PDF DOCUMENT\n\nPreview unavailable")
 
             # 2. Word (DOCX) Preview
             elif ext in (".docx", ".doc"):
@@ -420,7 +444,7 @@ class ImagePreviewWidget(QFrame):
                 self.lbl_dim.setText(f"{meta.get('word_count', 0)} words, {meta.get('paragraphs', 0)} paras")
                 self.preview_lbl.setPixmap(QPixmap())
                 self.preview_lbl.setText(
-                    f"📘 Microsoft Word Document\n\n"
+                    f"WORD DOCUMENT\n\n"
                     f"• Paragraphs: {meta.get('paragraphs', 0)}\n"
                     f"• Tables: {meta.get('tables', 0)}\n"
                     f"• Words: ~{meta.get('word_count', 0)}"
@@ -433,7 +457,7 @@ class ImagePreviewWidget(QFrame):
                 cols_preview = ", ".join(meta.get("columns", [])[:5])
                 self.preview_lbl.setPixmap(QPixmap())
                 self.preview_lbl.setText(
-                    f"📝 CSV Tabular Data\n\n"
+                    f"CSV DATA\n\n"
                     f"• Rows: {meta.get('rows', 0)}\n"
                     f"• Columns: {meta.get('cols', 0)}\n"
                     f"• Headers: {cols_preview}"
@@ -446,7 +470,7 @@ class ImagePreviewWidget(QFrame):
                 sheets_preview = ", ".join(meta.get("sheets", [])[:4])
                 self.preview_lbl.setPixmap(QPixmap())
                 self.preview_lbl.setText(
-                    f"📊 Excel Workbook\n\n"
+                    f"EXCEL WORKBOOK\n\n"
                     f"• Sheets: {sheets_preview}\n"
                     f"• Rows: {meta.get('rows', 0)}\n"
                     f"• Columns: {meta.get('cols', 0)}"
@@ -458,7 +482,7 @@ class ImagePreviewWidget(QFrame):
                 self.lbl_dim.setText(f"{meta.get('slide_count', 0)} slides")
                 self.preview_lbl.setPixmap(QPixmap())
                 self.preview_lbl.setText(
-                    f"📽️ PowerPoint Presentation\n\n"
+                    f"POWERPOINT PRESENTATION\n\n"
                     f"• Title: {meta.get('title', p.stem)}\n"
                     f"• Slides: {meta.get('slide_count', 0)}"
                 )
@@ -469,7 +493,7 @@ class ImagePreviewWidget(QFrame):
                 self.lbl_dim.setText(f"{meta.get('word_count', 0)} words, {meta.get('paragraphs', 0)} paras")
                 self.preview_lbl.setPixmap(QPixmap())
                 self.preview_lbl.setText(
-                    f"📄 OpenDocument Text\n\n"
+                    f"OPENDOCUMENT TEXT\n\n"
                     f"• Paragraphs: {meta.get('paragraphs', 0)}\n"
                     f"• Words: ~{meta.get('word_count', 0)}"
                 )
@@ -480,7 +504,7 @@ class ImagePreviewWidget(QFrame):
                 self.lbl_dim.setText(f"{meta.get('word_count', 0)} words, {meta.get('line_count', 0)} lines")
                 self.preview_lbl.setPixmap(QPixmap())
                 self.preview_lbl.setText(
-                    f"📝 Rich Text Format\n\n"
+                    f"RICH TEXT DOCUMENT\n\n"
                     f"• Lines: {meta.get('line_count', 0)}\n"
                     f"• Words: ~{meta.get('word_count', 0)}"
                 )
@@ -491,7 +515,7 @@ class ImagePreviewWidget(QFrame):
                 self.lbl_dim.setText(f"{meta.get('words', 0)} words, {meta.get('lines', 0)} lines")
                 self.preview_lbl.setPixmap(QPixmap())
                 self.preview_lbl.setText(
-                    f"📄 Plain Text Document\n\n"
+                    f"PLAIN TEXT DOCUMENT\n\n"
                     f"• Lines: {meta.get('lines', 0)}\n"
                     f"• Words: ~{meta.get('words', 0)}"
                 )
@@ -518,14 +542,15 @@ class ImagePreviewWidget(QFrame):
         self.btn_open_location.setEnabled(False)
         self.btn_copy_path.setEnabled(False)
         self.preview_lbl.setPixmap(QPixmap())
-        self.preview_lbl.setText("Select a file to preview")
+        self.preview_lbl.setText("No file selected\n\nChoose a row in the conversion queue.")
         self.lbl_name.setText("-")
         self.lbl_dim.setText("-")
         self.lbl_format.setText("-")
         self.lbl_size.setText("-")
         if hasattr(self, "lbl_meta_privacy"):
             self.lbl_meta_privacy.setText("-")
-            self.lbl_meta_privacy.setStyleSheet("")
+            self.lbl_meta_privacy.setProperty("state", "")
+            repolish(self.lbl_meta_privacy)
 
 
 FilePreviewWidget = ImagePreviewWidget
@@ -538,19 +563,22 @@ class ConversionSettingsWidget(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("CardFrame")
-        self.setMinimumWidth(300)
-        self.setMaximumWidth(520)
+        self.setObjectName("InspectorContent")
+        self.setMinimumWidth(0)
 
         self.bg_color_rgb = (255, 255, 255)  # default white
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(8)
 
-        title = QLabel("CONVERSION SETTINGS")
+        title = QLabel("Conversion setup")
         title.setObjectName("SectionTitle")
         layout.addWidget(title)
+        subtitle = QLabel("These defaults apply to the batch. Each queue row can override the format.")
+        subtitle.setObjectName("MutedLabel")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
 
         # Tab Widget for organized settings
         self.tabs = QTabWidget()
@@ -561,16 +589,53 @@ class ConversionSettingsWidget(QFrame):
         out_tab_layout.setContentsMargins(8, 12, 8, 8)
         out_tab_layout.setSpacing(10)
 
+        # Intent presets set output format and quality together.
+        preset_label = QLabel("Intent preset")
+        preset_label.setObjectName("SectionTitle")
+        out_tab_layout.addWidget(preset_label)
+        preset_grid = QGridLayout()
+        preset_grid.setHorizontalSpacing(5)
+        preset_grid.setVerticalSpacing(5)
+        self.preset_group = QButtonGroup(self)
+        self.preset_group.setExclusive(True)
+        self.preset_buttons = {}
+        for index, (key, label) in enumerate((
+            ("email", "Email-friendly"),
+            ("web", "Web-optimized"),
+            ("archive", "Archive quality"),
+        )):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setAccessibleDescription(f"Apply the {label.lower()} output preset.")
+            set_variant(button, "mode")
+            button.clicked.connect(lambda _checked=False, preset=key: self._apply_preset(preset))
+            self.preset_group.addButton(button)
+            self.preset_buttons[key] = button
+            if index < 2:
+                preset_grid.addWidget(button, 0, index)
+            else:
+                preset_grid.addWidget(button, 1, 0, 1, 2)
+        out_tab_layout.addLayout(preset_grid)
+
         # Target Format
         fmt_layout = QHBoxLayout()
-        fmt_lbl = QLabel("Target Format:")
-        fmt_lbl.setStyleSheet("font-weight: 600;")
+        fmt_lbl = QLabel("Format")
+        fmt_lbl.setObjectName("SectionTitle")
         self.combo_format = QComboBox()
-        self.combo_format.addItems(get_supported_output_formats())
+        self.combo_format.setAccessibleName("Default output format")
+        self.combo_format.setAccessibleDescription("Formats valid for every file in the queue.")
+        self.combo_format.setMinimumHeight(36)
         self.combo_format.currentTextChanged.connect(self._on_format_changed)
         fmt_layout.addWidget(fmt_lbl)
         fmt_layout.addWidget(self.combo_format)
         out_tab_layout.addLayout(fmt_layout)
+        self._available_formats = get_supported_output_formats()
+        self.set_available_formats(self._available_formats, preferred="JPG")
+
+        self.lbl_format_summary = QLabel("")
+        self.lbl_format_summary.setObjectName("MutedLabel")
+        self.lbl_format_summary.setWordWrap(True)
+        out_tab_layout.addWidget(self.lbl_format_summary)
 
         # Quality Slider (for lossy image formats)
         self.quality_group = QFrame()
@@ -579,17 +644,22 @@ class ConversionSettingsWidget(QFrame):
         q_layout.setSpacing(4)
 
         q_head = QHBoxLayout()
-        q_label = QLabel("Quality / Compression:")
+        q_label = QLabel("Quality")
+        q_label.setObjectName("SectionTitle")
         self.lbl_quality_val = QLabel("90%")
-        self.lbl_quality_val.setStyleSheet("font-weight: 600; color: #a5b4fc;")
+        self.lbl_quality_val.setObjectName("CountBadge")
+        self.lbl_estimated_size = QLabel("Estimated output: —")
+        self.lbl_estimated_size.setObjectName("MutedLabel")
         q_head.addWidget(q_label)
         q_head.addStretch()
+        q_head.addWidget(self.lbl_estimated_size)
         q_head.addWidget(self.lbl_quality_val)
 
         self.slider_quality = QSlider(Qt.Orientation.Horizontal)
         self.slider_quality.setRange(1, 100)
         self.slider_quality.setValue(90)
         self.slider_quality.valueChanged.connect(self._on_quality_slider_changed)
+        self.slider_quality.setAccessibleName("Output quality")
 
         self.chk_lossless = QCheckBox("Lossless (WEBP)")
         self.chk_lossless.setVisible(False)
@@ -600,10 +670,15 @@ class ConversionSettingsWidget(QFrame):
         q_layout.addWidget(self.chk_lossless)
         out_tab_layout.addWidget(self.quality_group)
 
-        # Output Folder Selection
-        out_box = QGroupBox("Destination Directory")
+        # Output folder uses the same flat section hierarchy as the rest of the panel.
+        out_box = QFrame()
+        out_box.setObjectName("SettingsSection")
         out_layout = QVBoxLayout(out_box)
+        out_layout.setContentsMargins(12, 10, 12, 12)
         out_layout.setSpacing(6)
+        destination_label = QLabel("Destination")
+        destination_label.setObjectName("SectionTitle")
+        out_layout.addWidget(destination_label)
 
         self.radio_same_dir = QRadioButton("Same folder as original")
         self.radio_same_dir.setChecked(True)
@@ -618,8 +693,10 @@ class ConversionSettingsWidget(QFrame):
         self.line_out_dir = QLineEdit()
         self.line_out_dir.setPlaceholderText("Select output folder...")
         self.line_out_dir.setEnabled(False)
+        self.line_out_dir.textChanged.connect(self.settings_changed)
 
-        self.btn_browse_dest = QPushButton("Browse...")
+        self.btn_browse_dest = QPushButton("Browse")
+        set_variant(self.btn_browse_dest, "secondary")
         self.btn_browse_dest.setEnabled(False)
         self.btn_browse_dest.clicked.connect(self._browse_custom_dest)
 
@@ -632,7 +709,7 @@ class ConversionSettingsWidget(QFrame):
 
         out_tab_layout.addWidget(out_box)
         out_tab_layout.addStretch()
-        self.tabs.addTab(tab_output, "General")
+        self.tabs.addTab(tab_output, "Format")
 
         # --- Tab 2: Dimensions & Image Transform ---
         tab_transform = QWidget()
@@ -664,6 +741,7 @@ class ConversionSettingsWidget(QFrame):
         self.spin_percent.setRange(5, 500)
         self.spin_percent.setValue(50)
         self.spin_percent.setSuffix(" %")
+        self.spin_percent.valueChanged.connect(self.settings_changed)
         pct_layout.addWidget(self.spin_percent)
         self.frame_percent.setVisible(False)
         r_layout.addWidget(self.frame_percent)
@@ -679,6 +757,7 @@ class ConversionSettingsWidget(QFrame):
         self.spin_width.setRange(1, 10000)
         self.spin_width.setValue(1920)
         self.spin_width.setSuffix(" px")
+        self.spin_width.valueChanged.connect(self.settings_changed)
         cd_layout.addWidget(self.spin_width, 0, 1)
 
         cd_layout.addWidget(QLabel("Height:"), 1, 0)
@@ -686,10 +765,12 @@ class ConversionSettingsWidget(QFrame):
         self.spin_height.setRange(1, 10000)
         self.spin_height.setValue(1080)
         self.spin_height.setSuffix(" px")
+        self.spin_height.valueChanged.connect(self.settings_changed)
         cd_layout.addWidget(self.spin_height, 1, 1)
 
         self.chk_aspect_ratio = QCheckBox("Keep Aspect Ratio")
         self.chk_aspect_ratio.setChecked(True)
+        self.chk_aspect_ratio.toggled.connect(self.settings_changed)
         cd_layout.addWidget(self.chk_aspect_ratio, 2, 0, 1, 2)
 
         self.frame_custom_dim.setVisible(False)
@@ -714,14 +795,14 @@ class ConversionSettingsWidget(QFrame):
         bg_box = QHBoxLayout(self.frame_bg)
         bg_box.setContentsMargins(0, 0, 0, 0)
         bg_box.addWidget(QLabel("Alpha Background:"))
-        self.btn_color = QPushButton("■ Color")
-        self.btn_color.setStyleSheet("color: white; font-weight: bold; background-color: #374151;")
+        self.btn_color = QPushButton("Choose color")
+        set_variant(self.btn_color, "secondary")
         self.btn_color.clicked.connect(self._pick_bg_color)
         bg_box.addWidget(self.btn_color)
         tr_tab_layout.addWidget(self.frame_bg)
 
         tr_tab_layout.addStretch()
-        self.tabs.addTab(tab_transform, "Transform")
+        self.tabs.addTab(tab_transform, "Resize")
 
         # --- Tab 3: Documents & Security ---
         tab_docs = QWidget()
@@ -761,7 +842,7 @@ class ConversionSettingsWidget(QFrame):
 
         doc_tab_layout.addWidget(doc_sec_box)
         doc_tab_layout.addStretch()
-        self.tabs.addTab(tab_docs, "Doc & OCR")
+        self.tabs.addTab(tab_docs, "Documents")
 
         # --- Tab 4: Privacy & Metadata ---
         tab_privacy = QWidget()
@@ -773,7 +854,7 @@ class ConversionSettingsWidget(QFrame):
         meta_layout = QVBoxLayout(meta_box)
         meta_layout.setSpacing(8)
 
-        self.chk_strip_metadata = QCheckBox("🗑️ Strip all metadata (Privacy mode)")
+        self.chk_strip_metadata = QCheckBox("Strip all metadata from output")
         self.chk_strip_metadata.setToolTip(
             "Strip all personal identifiable information, author properties, "
             "camera/device tags, GPS coordinates, and timestamps across all formats."
@@ -795,20 +876,125 @@ class ConversionSettingsWidget(QFrame):
         priv_tab_layout.addWidget(meta_box)
 
         lbl_priv_help = QLabel(
-            "💡 Privacy Mode removes author info, revision history, and GPS tags from output files."
+            "Privacy mode removes author information, revision history, device details, and GPS tags."
         )
         lbl_priv_help.setObjectName("MutedLabel")
         lbl_priv_help.setWordWrap(True)
         priv_tab_layout.addWidget(lbl_priv_help)
         priv_tab_layout.addStretch()
-        self.tabs.addTab(tab_privacy, "Privacy")
+        self.tabs.addTab(tab_privacy, "Metadata")
 
         layout.addWidget(self.tabs)
 
         self._on_format_changed(self.combo_format.currentText())
 
+    FORMAT_CATEGORIES = (
+        ("Mixed queue", ("PER_FILE",)),
+        ("Images", ("JPG", "PNG", "WEBP", "HEIC", "BMP", "TIFF", "GIF", "ICO")),
+        ("Documents", ("PDF", "DOCX", "ODT", "RTF")),
+        ("Spreadsheets", ("XLSX", "CSV")),
+        ("Presentations", ("PPTX",)),
+        ("Text & data", ("TXT", "JSON", "HTML")),
+        ("Utilities", ("STRIP_METADATA", "CLEAN")),
+    )
+
+    def set_available_formats(self, formats: List[str], preferred: Optional[str] = None):
+        """Populate a categorized, non-selectable format menu."""
+        normalized = [fmt.upper() for fmt in formats]
+        normalized = list(dict.fromkeys(normalized))
+        if not normalized:
+            normalized = [fmt.upper() for fmt in get_supported_output_formats()]
+        if normalized == getattr(self, "_available_formats", None) and self.combo_format.count():
+            return
+
+        previous = (preferred or self.combo_format.currentText() or "JPG").upper()
+        self._available_formats = normalized
+        model = QStandardItemModel(self.combo_format)
+        first_format_index = -1
+        for category, category_formats in self.FORMAT_CATEGORIES:
+            available = [fmt for fmt in category_formats if fmt in normalized]
+            if not available:
+                continue
+            header = QStandardItem(category)
+            header.setEnabled(False)
+            header.setSelectable(False)
+            font = QFont(header.font())
+            font.setWeight(QFont.Weight.DemiBold)
+            header.setFont(font)
+            model.appendRow(header)
+            for fmt in available:
+                item = QStandardItem(fmt)
+                item.setData(fmt, Qt.ItemDataRole.UserRole)
+                model.appendRow(item)
+                if first_format_index < 0:
+                    first_format_index = model.rowCount() - 1
+
+        self.combo_format.blockSignals(True)
+        self.combo_format.setModel(model)
+        desired = self.combo_format.findText(previous)
+        self.combo_format.setCurrentIndex(desired if desired >= 0 else first_format_index)
+        self.combo_format.blockSignals(False)
+
+    def set_queue_context(
+        self,
+        formats: List[str],
+        has_images: bool,
+        has_documents: bool,
+        estimated_size: Optional[int],
+        mixed_queue: bool = False,
+    ):
+        """Make tabs, formats, and estimates reflect the current queue."""
+        current = self.get_target_format()
+        available = ["PER_FILE"] if mixed_queue else (formats or get_supported_output_formats())
+        self.set_available_formats(available, preferred=current)
+        self.tabs.tabBar().setTabVisible(1, has_images)
+        self.tabs.tabBar().setTabVisible(2, has_documents)
+        self.set_estimated_size(estimated_size)
+        self._update_format_controls(self.get_target_format())
+
+    def set_estimated_size(self, size_bytes: Optional[int]):
+        self.lbl_estimated_size.setText(
+            f"Estimated output: ~{format_bytes(size_bytes)}"
+            if size_bytes is not None
+            else "Estimated output: —"
+        )
+
+    def _apply_preset(self, preset: str):
+        options = {
+            "email": (("JPG", "WEBP", "PDF"), 65),
+            "web": (("WEBP", "JPG", "HTML"), 80),
+            "archive": (("PNG", "TIFF", "PDF"), 100),
+        }
+        candidates, quality = options[preset]
+        selected = next((fmt for fmt in candidates if self.combo_format.findText(fmt) >= 0), None)
+        if selected:
+            self.combo_format.setCurrentText(selected)
+        self.slider_quality.setValue(quality)
+
     def _on_format_changed(self, fmt: str):
+        self._update_format_controls(fmt)
+        self.settings_changed.emit()
+
+    def _update_format_controls(self, fmt: str):
         fmt = fmt.upper()
+        descriptions = {
+            "JPG": "Compact and widely compatible. Best for photos without transparency.",
+            "JPEG": "Compact and widely compatible. Best for photos without transparency.",
+            "PNG": "Lossless image output with transparency support.",
+            "WEBP": "Modern image output with excellent compression.",
+            "PDF": "Portable document output for sharing, printing, and archiving.",
+            "DOCX": "Editable Microsoft Word document output.",
+            "XLSX": "Editable Microsoft Excel workbook output.",
+            "CSV": "Simple tabular data for broad compatibility.",
+            "TXT": "Plain text output without formatting.",
+            "JSON": "Structured text output for software workflows.",
+            "HTML": "Web-ready document or tabular output.",
+            "STRIP_METADATA": "Keep the file format while removing supported metadata.",
+            "PER_FILE": "This mixed queue has no single common output. Each row keeps its compatible target.",
+        }
+        self.lbl_format_summary.setText(
+            descriptions.get(fmt, f"Convert compatible queue items to {fmt}.")
+        )
         # Quality slider is applicable for JPG, WEBP, HEIC
         supports_quality = fmt in ("JPG", "JPEG", "WEBP", "HEIC", "HEIF")
         self.quality_group.setVisible(supports_quality)
@@ -827,8 +1013,6 @@ class ConversionSettingsWidget(QFrame):
         # Sheet name applicable for Excel conversions
         self.frame_sheet.setVisible(fmt in ("CSV", "XLSX", "PDF", "JSON", "HTML"))
 
-        self.settings_changed.emit()
-
     def _on_quality_slider_changed(self, val: int):
         self.lbl_quality_val.setText(f"{val}%")
         self.settings_changed.emit()
@@ -843,12 +1027,14 @@ class ConversionSettingsWidget(QFrame):
         if color.isValid():
             self.bg_color_rgb = (color.red(), color.green(), color.blue())
             hex_col = color.name()
-            self.btn_color.setStyleSheet(f"background-color: {hex_col}; color: {'black' if color.lightness() > 128 else 'white'};")
+            self.btn_color.setText(f"Background {hex_col.upper()}")
+            self.settings_changed.emit()
 
     def _on_dest_radio_changed(self):
         custom = self.radio_custom_dir.isChecked()
         self.line_out_dir.setEnabled(custom)
         self.btn_browse_dest.setEnabled(custom)
+        self.settings_changed.emit()
 
     def _browse_custom_dest(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Output Destination")
@@ -925,11 +1111,11 @@ class QueueTableWidget(QTableWidget):
             "Status",
             "Preview",
             "File Name",
-            "Input",
-            "Target",
+            "From",
+            "Convert to",
             "Details",
-            "Original Size",
-            "Converted Size",
+            "Input size",
+            "Output size",
         ])
         self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -943,10 +1129,13 @@ class QueueTableWidget(QTableWidget):
 
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.verticalHeader().setDefaultSectionSize(52)
+        self.verticalHeader().setDefaultSectionSize(56)
         self.verticalHeader().setVisible(False)
         self.setShowGrid(False)
         self.setAlternatingRowColors(True)
+        self.setWordWrap(False)
+        self.setToolTip("Select multiple rows with Ctrl or Shift. Right-click for file actions.")
+        self.setAccessibleName("Conversion queue")
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
@@ -985,23 +1174,23 @@ class QueueTableWidget(QTableWidget):
         menu = QMenu(self)
 
         if len(selected_files) == 1:
-            act_open_loc = menu.addAction("📂 Open File Location")
-            act_copy_path = menu.addAction("📋 Copy Full Path")
-            act_inspect_meta = menu.addAction("🔍 Inspect Metadata")
+            act_open_loc = menu.addAction("Open File Location")
+            act_copy_path = menu.addAction("Copy Full Path")
+            act_inspect_meta = menu.addAction("Inspect Metadata")
             menu.addSeparator()
 
             act_split = None
             act_org = None
             act_comp = None
             if ext == ".pdf":
-                act_split = menu.addAction("✂️ Split this PDF...")
-                act_org = menu.addAction("📑 Reorganize pages...")
-                act_comp = menu.addAction("🗜️ Compress this PDF...")
+                act_split = menu.addAction("Split this PDF...")
+                act_org = menu.addAction("Reorganize pages...")
+                act_comp = menu.addAction("Compress this PDF...")
                 menu.addSeparator()
 
-            act_merge = menu.addAction("🔗 Merge with other files...")
+            act_merge = menu.addAction("Merge with other files...")
             menu.addSeparator()
-            act_remove = menu.addAction("🗑️ Remove from Queue")
+            act_remove = menu.addAction("Remove from Queue")
         else:
             act_open_loc = None
             act_copy_path = None
@@ -1009,9 +1198,9 @@ class QueueTableWidget(QTableWidget):
             act_split = None
             act_org = None
             act_comp = None
-            act_merge = menu.addAction(f"🔗 Merge {len(selected_files)} selected files to PDF...")
+            act_merge = menu.addAction(f"Merge {len(selected_files)} selected files to PDF...")
             menu.addSeparator()
-            act_remove = menu.addAction(f"🗑️ Remove {len(selected_files)} selected files from Queue")
+            act_remove = menu.addAction(f"Remove {len(selected_files)} selected files from Queue")
 
         chosen = menu.exec(self.viewport().mapToGlobal(pos))
         if act_open_loc and chosen == act_open_loc:
@@ -1053,9 +1242,9 @@ class QueueTableWidget(QTableWidget):
         ext = file_path.suffix.lower()
 
         # 0. Status
-        status_item = QTableWidgetItem("⏳ Pending")
+        status_item = QTableWidgetItem("Ready")
         status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_item.setForeground(QColor("#9ca3af"))
+        status_item.setForeground(QColor("#91a5c0"))
         self.setItem(row, 0, status_item)
 
         # 1. Thumbnail
@@ -1078,23 +1267,23 @@ class QueueTableWidget(QTableWidget):
                     thumb_label.setPixmap(qpix)
                     dim_item.setText(f"{len(doc)} pgs")
                 else:
-                    thumb_label.setText("📄")
+                    thumb_label.setText("PDF")
                     dim_item.setText("0 pgs")
                 doc.close()
 
             elif ext in (".docx", ".doc"):
-                thumb_label.setText("📘")
-                thumb_label.setStyleSheet("font-size: 20px;")
+                thumb_label.setText("DOC")
+                thumb_label.setProperty("role", "fileGlyph")
                 dim_item.setText("DOCX")
 
             elif ext == ".csv":
-                thumb_label.setText("📝")
-                thumb_label.setStyleSheet("font-size: 20px;")
+                thumb_label.setText("CSV")
+                thumb_label.setProperty("role", "fileGlyph")
                 dim_item.setText("CSV")
 
             elif ext in (".xlsx", ".xls"):
-                thumb_label.setText("📊")
-                thumb_label.setStyleSheet("font-size: 20px;")
+                thumb_label.setText("XLS")
+                thumb_label.setProperty("role", "fileGlyph")
                 dim_item.setText("Excel")
 
             else:
@@ -1104,7 +1293,7 @@ class QueueTableWidget(QTableWidget):
                     dim_item.setText(f"{img.width}×{img.height}")
         except Exception as thumb_err:
             logger.debug(f"Queue thumbnail generation fallback for {file_path.name}: {thumb_err}")
-            thumb_label.setText("📄")
+            thumb_label.setText("FILE")
 
         self.setCellWidget(row, 1, thumb_label)
         self.setItem(row, 5, dim_item)
@@ -1138,7 +1327,7 @@ class QueueTableWidget(QTableWidget):
         self.setItem(row, 4, target_item)
 
         combo_target.currentTextChanged.connect(
-            lambda text, r_idx=row: self._on_row_target_changed(r_idx, text)
+            lambda text, combo=combo_target: self._on_target_combo_changed(combo, text)
         )
         self.setCellWidget(row, 4, combo_target)
 
@@ -1154,6 +1343,12 @@ class QueueTableWidget(QTableWidget):
         self.setItem(row, 7, out_size_item)
 
     add_file_item = add_image_item
+
+    def _on_target_combo_changed(self, combo: QComboBox, new_target: str):
+        """Resolve the current row dynamically so removals never stale signal indexes."""
+        row = self.indexAt(combo.pos()).row()
+        if row >= 0:
+            self._on_row_target_changed(row, new_target)
 
     def _on_row_target_changed(self, row: int, new_target: str):
         """Keep underlying QTableWidgetItem synchronized with combobox selection."""
@@ -1207,7 +1402,7 @@ class QueueTableWidget(QTableWidget):
         item = self.item(row, 7)
         if item:
             item.setText(format_bytes(size_bytes))
-            item.setForeground(QColor("#34d399"))
+            item.setForeground(QColor("#55e0b4"))
 
     def clear_all(self):
         self.setRowCount(0)

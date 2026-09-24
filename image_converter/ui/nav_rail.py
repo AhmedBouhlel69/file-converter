@@ -10,54 +10,52 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
+    QHBoxLayout,
     QPushButton,
-    QVBoxLayout,
 )
 
 
 class NavRailWidget(QFrame):
-    """Vertical navigation rail with icon buttons and active state indicator."""
+    """Compact segmented navigation for the workspace inspector."""
 
     tab_changed = Signal(int)  # Emits selected tab index
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("NavRail")
-        self.setFixedWidth(74)
+        self.setFixedHeight(46)
 
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(4, 12, 4, 12)
-        self.layout.setSpacing(8)
-        self.layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(4, 4, 4, 4)
+        self.layout.setSpacing(4)
 
         self.btn_group = QButtonGroup(self)
         self.btn_group.setExclusive(True)
         self.buttons: List[QPushButton] = []
 
         tabs: List[Tuple[str, str, str]] = [
-            ("⚙️", "Settings", "Conversion Settings and Target Formats"),
-            ("🔍", "Preview", "Selected File Inspector and Metadata Preview"),
-            ("📊", "Stats", "Batch Conversion Statistics and Savings"),
+            ("01", "Output", "Choose output format and conversion options"),
+            ("02", "Inspect", "Preview the selected file and review its metadata"),
+            ("03", "Results", "Review batch results and storage savings"),
         ]
 
         for idx, (icon, label, tooltip) in enumerate(tabs):
-            btn = QPushButton(f"{icon}\n{label}")
+            btn = QPushButton(f"{icon}  {label}")
             btn.setCheckable(True)
             btn.setToolTip(tooltip)
+            btn.setAccessibleName(f"{label} inspector tab")
             btn.setObjectName("NavButton")
-            btn.setFixedSize(64, 56)
+            btn.setMinimumHeight(36)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
             btn.clicked.connect(lambda checked=False, i=idx: self._on_button_clicked(i))
             
             self.btn_group.addButton(btn, idx)
             self.buttons.append(btn)
-            self.layout.addWidget(btn)
+            self.layout.addWidget(btn, stretch=1)
 
         if self.buttons:
             self.buttons[0].setChecked(True)
-
-        self.layout.addStretch()
 
     def _on_button_clicked(self, index: int):
         self.tab_changed.emit(index)

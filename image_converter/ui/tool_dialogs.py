@@ -11,6 +11,7 @@ Clean, modal dialogs for local PDF tools:
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -20,6 +21,8 @@ from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -35,6 +38,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -43,6 +47,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from image_converter.core.engine import (
+    ConversionConfig,
+    FORMAT_EXTENSIONS,
+    IMAGE_INPUT_EXTS,
+    UniversalConverterEngine,
+)
 from image_converter.core.pdf_tools import (
     compress_pdf,
     merge_pdfs,
@@ -50,6 +60,7 @@ from image_converter.core.pdf_tools import (
     split_pdf,
 )
 from image_converter.ui.components import format_bytes
+from image_converter.ui.theme import icon, repolish, set_variant
 
 
 def fitz_page_to_qpixmap(page: fitz.Page, dpi: int = 72) -> QPixmap:
@@ -88,9 +99,9 @@ class MergeDialog(QDialog):
 
         # Header
         header = QLabel("Merge Files into a Single PDF")
-        header.setStyleSheet("font-size: 16px; font-weight: 700; color: #f8fafc;")
-        sub = QLabel("Reorder PDFs and images to combine them into one document. 100% local.")
-        sub.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        header.setObjectName("HeaderLabel")
+        sub = QLabel("Reorder PDFs and images to combine them into one document.")
+        sub.setObjectName("MutedLabel")
         layout.addWidget(header)
         layout.addWidget(sub)
 
@@ -102,35 +113,33 @@ class MergeDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setStyleSheet(
-            "QTableWidget { background-color: #1a1d26; border: 1px solid #282c38; border-radius: 8px; color: #f3f4f6; gridline-color: #242938; }"
-            "QTableWidget::item:selected { background-color: #3b4256; color: #ffffff; }"
-            "QHeaderView::section { background-color: #12141c; color: #94a3b8; padding: 6px; border: none; font-weight: 600; }"
-        )
+        self.table.setAccessibleName("Files to merge")
         layout.addWidget(self.table, stretch=1)
 
         # Control buttons under table
         ctrl_bar = QHBoxLayout()
         ctrl_bar.setSpacing(8)
 
-        self.btn_add = QPushButton("➕ Add Files...")
-        self.btn_add.setObjectName("SecondaryButton")
+        self.btn_add = QPushButton("Add files")
+        self.btn_add.setIcon(icon("plus"))
+        set_variant(self.btn_add, "secondary")
         self.btn_add.clicked.connect(self._on_add_files)
 
         self.btn_up = QPushButton("▲ Move Up")
-        self.btn_up.setObjectName("SecondaryButton")
+        set_variant(self.btn_up, "secondary")
         self.btn_up.clicked.connect(self._move_up)
 
         self.btn_down = QPushButton("▼ Move Down")
-        self.btn_down.setObjectName("SecondaryButton")
+        set_variant(self.btn_down, "secondary")
         self.btn_down.clicked.connect(self._move_down)
 
-        self.btn_remove = QPushButton("🗑️ Remove")
-        self.btn_remove.setObjectName("SecondaryButton")
+        self.btn_remove = QPushButton("Remove")
+        self.btn_remove.setIcon(icon("trash"))
+        set_variant(self.btn_remove, "ghost")
         self.btn_remove.clicked.connect(self._remove_selected)
 
         self.btn_clear = QPushButton("Clear")
-        self.btn_clear.setObjectName("DangerButton")
+        set_variant(self.btn_clear, "danger")
         self.btn_clear.clicked.connect(self._clear_all)
 
         ctrl_bar.addWidget(self.btn_add)
@@ -143,17 +152,16 @@ class MergeDialog(QDialog):
 
         # Options
         opt_frame = QFrame()
-        opt_frame.setStyleSheet("background-color: #12141c; border-radius: 8px; padding: 10px;")
+        opt_frame.setObjectName("InnerCard")
         opt_layout = QVBoxLayout(opt_frame)
         opt_layout.setContentsMargins(10, 8, 10, 8)
         opt_layout.setSpacing(8)
 
         out_row = QHBoxLayout()
         out_lbl = QLabel("Output PDF:")
-        out_lbl.setStyleSheet("color: #cbd5e1; font-weight: 600;")
+        out_lbl.setObjectName("SectionTitle")
         self.txt_output = QLineEdit()
         self.txt_output.setPlaceholderText("Select destination file...")
-        self.txt_output.setStyleSheet("background-color: #1a1d26; color: #f3f4f6; border: 1px solid #363b4d; border-radius: 6px; padding: 6px;")
         btn_browse_out = QPushButton("Browse...")
         btn_browse_out.clicked.connect(self._browse_output)
         out_row.addWidget(out_lbl)
@@ -166,13 +174,13 @@ class MergeDialog(QDialog):
         # Bottom actions
         bot_bar = QHBoxLayout()
         self.lbl_status = QLabel("0 files selected")
-        self.lbl_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.lbl_status.setObjectName("MutedLabel")
 
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.clicked.connect(self.reject)
 
         self.btn_merge = QPushButton("Merge to PDF")
-        self.btn_merge.setStyleSheet("background-color: #4f46e5; color: #ffffff; font-weight: 600; padding: 8px 18px; border-radius: 6px;")
+        set_variant(self.btn_merge, "primary")
         self.btn_merge.clicked.connect(self._execute_merge)
 
         bot_bar.addWidget(self.lbl_status)
@@ -298,20 +306,20 @@ class SplitDialog(QDialog):
 
         # Header
         header = QLabel("Split PDF Document")
-        header.setStyleSheet("font-size: 16px; font-weight: 700; color: #f8fafc;")
-        sub = QLabel("Divide a PDF into single pages, chunks, or custom page ranges. 100% local.")
-        sub.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        header.setObjectName("HeaderLabel")
+        sub = QLabel("Divide a PDF into single pages, chunks, or custom page ranges.")
+        sub.setObjectName("MutedLabel")
         layout.addWidget(header)
         layout.addWidget(sub)
 
         # File Selection Card
         file_card = QFrame()
-        file_card.setStyleSheet("background-color: #12141c; border-radius: 8px; padding: 10px;")
+        file_card.setObjectName("InnerCard")
         fc_layout = QVBoxLayout(file_card)
 
         f_row = QHBoxLayout()
         self.lbl_file = QLabel("No PDF file selected")
-        self.lbl_file.setStyleSheet("color: #cbd5e1; font-weight: 600;")
+        self.lbl_file.setObjectName("SectionTitle")
         btn_browse = QPushButton("Choose PDF...")
         btn_browse.clicked.connect(self._browse_input)
         f_row.addWidget(self.lbl_file, stretch=1)
@@ -319,13 +327,13 @@ class SplitDialog(QDialog):
         fc_layout.addLayout(f_row)
 
         self.lbl_meta = QLabel("Pages: - • Size: -")
-        self.lbl_meta.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.lbl_meta.setObjectName("MutedLabel")
         fc_layout.addWidget(self.lbl_meta)
         layout.addWidget(file_card)
 
         # Split Options
         opt_group = QFrame()
-        opt_group.setStyleSheet("background-color: #1a1d26; border: 1px solid #282c38; border-radius: 8px; padding: 12px;")
+        opt_group.setObjectName("InnerCard")
         opt_layout = QVBoxLayout(opt_group)
         opt_layout.setSpacing(10)
 
@@ -346,7 +354,6 @@ class SplitDialog(QDialog):
         ranges_row.addWidget(self.rb_ranges)
         self.txt_ranges = QLineEdit()
         self.txt_ranges.setPlaceholderText("e.g. 1-3, 5, 7-end")
-        self.txt_ranges.setStyleSheet("background-color: #12141c; color: #f3f4f6; border: 1px solid #363b4d; border-radius: 6px; padding: 6px;")
         ranges_row.addWidget(self.txt_ranges)
 
         self.btn_group = QButtonGroup(self)
@@ -362,10 +369,9 @@ class SplitDialog(QDialog):
         # Output Folder
         out_row = QHBoxLayout()
         out_lbl = QLabel("Output Folder:")
-        out_lbl.setStyleSheet("color: #cbd5e1; font-weight: 600;")
+        out_lbl.setObjectName("SectionTitle")
         self.txt_output_dir = QLineEdit()
         self.txt_output_dir.setPlaceholderText("Select destination directory...")
-        self.txt_output_dir.setStyleSheet("background-color: #1a1d26; color: #f3f4f6; border: 1px solid #363b4d; border-radius: 6px; padding: 6px;")
         btn_browse_dir = QPushButton("Browse...")
         btn_browse_dir.clicked.connect(self._browse_dir)
         out_row.addWidget(out_lbl)
@@ -381,7 +387,7 @@ class SplitDialog(QDialog):
         self.btn_cancel.clicked.connect(self.reject)
 
         self.btn_split = QPushButton("Split PDF")
-        self.btn_split.setStyleSheet("background-color: #4f46e5; color: #ffffff; font-weight: 600; padding: 8px 18px; border-radius: 6px;")
+        set_variant(self.btn_split, "primary")
         self.btn_split.clicked.connect(self._execute_split)
 
         bot_bar.addStretch()
@@ -480,9 +486,9 @@ class OrganizePagesDialog(QDialog):
         top_row = QHBoxLayout()
         h_box = QVBoxLayout()
         header = QLabel("Reorganize PDF Pages")
-        header.setStyleSheet("font-size: 16px; font-weight: 700; color: #f8fafc;")
-        sub = QLabel("Reorder, rotate, duplicate, or remove pages. 100% local.")
-        sub.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        header.setObjectName("HeaderLabel")
+        sub = QLabel("Reorder, rotate, duplicate, or remove pages.")
+        sub.setObjectName("MutedLabel")
         h_box.addWidget(header)
         h_box.addWidget(sub)
         top_row.addLayout(h_box)
@@ -499,11 +505,7 @@ class OrganizePagesDialog(QDialog):
         self.list_widget.setViewMode(QListWidget.ViewMode.IconMode)
         self.list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.list_widget.setSpacing(12)
-        self.list_widget.setStyleSheet(
-            "QListWidget { background-color: #12141c; border: 1px solid #282c38; border-radius: 8px; padding: 10px; color: #cbd5e1; }"
-            "QListWidget::item { background-color: #1a1d26; border: 1px solid #363b4d; border-radius: 6px; padding: 6px; }"
-            "QListWidget::item:selected { background-color: #3b4256; border-color: #6366f1; color: #ffffff; }"
-        )
+        self.list_widget.setAccessibleName("PDF page thumbnails")
         layout.addWidget(self.list_widget, stretch=1)
 
         # Toolbar under list
@@ -523,7 +525,7 @@ class OrganizePagesDialog(QDialog):
         self.btn_dup.clicked.connect(self._duplicate_selected)
 
         self.btn_del = QPushButton("Delete")
-        self.btn_del.setObjectName("DangerButton")
+        set_variant(self.btn_del, "danger")
         self.btn_del.clicked.connect(self._delete_selected)
 
         action_bar.addWidget(self.btn_move_left)
@@ -534,7 +536,7 @@ class OrganizePagesDialog(QDialog):
         action_bar.addStretch()
 
         self.lbl_page_count = QLabel("0 pages")
-        self.lbl_page_count.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.lbl_page_count.setObjectName("MutedLabel")
         action_bar.addWidget(self.lbl_page_count)
         layout.addLayout(action_bar)
 
@@ -544,7 +546,7 @@ class OrganizePagesDialog(QDialog):
         self.btn_cancel.clicked.connect(self.reject)
 
         self.btn_save = QPushButton("Save Reorganized PDF...")
-        self.btn_save.setStyleSheet("background-color: #4f46e5; color: #ffffff; font-weight: 600; padding: 8px 18px; border-radius: 6px;")
+        set_variant(self.btn_save, "primary")
         self.btn_save.clicked.connect(self._save_pdf)
 
         bot_bar.addStretch()
@@ -670,6 +672,291 @@ class OrganizePagesDialog(QDialog):
 # 4. COMPRESS DIALOG
 # ===========================================================================
 
+class ImageCompressDialog(QDialog):
+    """Compress one or more images through the standard conversion engine."""
+
+    IMAGE_FILTER = (
+        "Images (*.jpg *.jpeg *.png *.heic *.heif *.webp *.bmp *.tiff *.tif *.gif *.ico);;"
+        "All Files (*.*)"
+    )
+
+    def __init__(self, initial_files: Optional[List[Path]] = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Compress Images")
+        self.resize(680, 540)
+        self.setMinimumSize(560, 430)
+
+        self.files: List[Path] = []
+        self.engine = UniversalConverterEngine()
+        self._init_ui()
+        if initial_files:
+            self.add_files(initial_files)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        header = QLabel("Compress Images")
+        header.setObjectName("HeaderLabel")
+        sub = QLabel("Create smaller image copies while keeping the originals unchanged.")
+        sub.setObjectName("MutedLabel")
+        layout.addWidget(header)
+        layout.addWidget(sub)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["File", "Type", "Size"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        layout.addWidget(self.table, stretch=1)
+
+        controls = QHBoxLayout()
+        self.btn_add = QPushButton("Add images")
+        self.btn_add.setIcon(icon("plus"))
+        set_variant(self.btn_add, "secondary")
+        self.btn_add.clicked.connect(self._on_add_files)
+        self.btn_remove = QPushButton("Remove")
+        self.btn_remove.setIcon(icon("trash"))
+        set_variant(self.btn_remove, "ghost")
+        self.btn_remove.clicked.connect(self._remove_selected)
+        self.btn_clear = QPushButton("Clear")
+        set_variant(self.btn_clear, "danger")
+        self.btn_clear.clicked.connect(self._clear_all)
+        controls.addWidget(self.btn_add)
+        controls.addWidget(self.btn_remove)
+        controls.addStretch()
+        controls.addWidget(self.btn_clear)
+        layout.addLayout(controls)
+
+        options = QFrame()
+        options.setObjectName("InnerCard")
+        options_layout = QVBoxLayout(options)
+        options_layout.setContentsMargins(12, 10, 12, 12)
+        options_layout.setSpacing(10)
+
+        format_row = QHBoxLayout()
+        format_row.addWidget(QLabel("Output format:"))
+        self.combo_format = QComboBox()
+        self.combo_format.addItems(["WEBP", "JPG", "PNG", "Keep original format"])
+        format_row.addWidget(self.combo_format)
+        format_row.addStretch()
+        options_layout.addLayout(format_row)
+
+        quality_row = QHBoxLayout()
+        quality_row.addWidget(QLabel("Quality:"))
+        self.slider_quality = QSlider(Qt.Orientation.Horizontal)
+        self.slider_quality.setRange(1, 100)
+        self.slider_quality.setValue(75)
+        self.lbl_quality = QLabel("75%")
+        self.lbl_quality.setObjectName("CountBadge")
+        self.slider_quality.valueChanged.connect(lambda value: self.lbl_quality.setText(f"{value}%"))
+        quality_row.addWidget(self.slider_quality, stretch=1)
+        quality_row.addWidget(self.lbl_quality)
+        options_layout.addLayout(quality_row)
+
+        resize_row = QHBoxLayout()
+        self.chk_resize = QCheckBox("Fit within")
+        self.chk_resize.setChecked(True)
+        self.spin_max_width = QSpinBox()
+        self.spin_max_width.setRange(64, 20000)
+        self.spin_max_width.setValue(1920)
+        self.spin_max_width.setSuffix(" px wide")
+        self.spin_max_height = QSpinBox()
+        self.spin_max_height.setRange(64, 20000)
+        self.spin_max_height.setValue(1920)
+        self.spin_max_height.setSuffix(" px tall")
+        resize_row.addWidget(self.chk_resize)
+        resize_row.addWidget(self.spin_max_width)
+        resize_row.addWidget(self.spin_max_height)
+        resize_row.addStretch()
+        options_layout.addLayout(resize_row)
+
+        self.chk_strip_metadata = QCheckBox("Strip metadata from compressed copies")
+        self.chk_strip_metadata.setChecked(True)
+        options_layout.addWidget(self.chk_strip_metadata)
+
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("Output folder:"))
+        self.txt_output_dir = QLineEdit()
+        self.txt_output_dir.setPlaceholderText("Same folder as each image")
+        btn_browse = QPushButton("Browse...")
+        btn_browse.clicked.connect(self._browse_output_dir)
+        out_row.addWidget(self.txt_output_dir, stretch=1)
+        out_row.addWidget(btn_browse)
+        options_layout.addLayout(out_row)
+        layout.addWidget(options)
+
+        self.lbl_result = QLabel("")
+        self.lbl_result.setProperty("state", "success")
+        self.lbl_result.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.lbl_result)
+
+        bottom = QHBoxLayout()
+        self.lbl_status = QLabel("0 images selected")
+        self.lbl_status.setObjectName("MutedLabel")
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_compress = QPushButton("Compress Images")
+        set_variant(self.btn_compress, "primary")
+        self.btn_compress.clicked.connect(self._execute_compress)
+        bottom.addWidget(self.lbl_status)
+        bottom.addStretch()
+        bottom.addWidget(self.btn_cancel)
+        bottom.addWidget(self.btn_compress)
+        layout.addLayout(bottom)
+
+    def add_files(self, paths: List[Path]):
+        existing = {str(path.resolve()).casefold() for path in self.files if path.exists()}
+        for raw_path in paths:
+            path = Path(raw_path)
+            if not path.is_file() or path.suffix.lower() not in IMAGE_INPUT_EXTS:
+                continue
+            key = str(path.resolve()).casefold()
+            if key in existing:
+                continue
+            existing.add(key)
+            self.files.append(path)
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(path.name))
+            self.table.setItem(row, 1, QTableWidgetItem(path.suffix.lstrip(".").upper()))
+            self.table.setItem(row, 2, QTableWidgetItem(format_bytes(path.stat().st_size)))
+        self._refresh_status()
+
+    def _on_add_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Images to Compress", "", self.IMAGE_FILTER)
+        if files:
+            self.add_files([Path(path) for path in files])
+
+    def _remove_selected(self):
+        rows = sorted({item.row() for item in self.table.selectedItems()}, reverse=True)
+        for row in rows:
+            if 0 <= row < len(self.files):
+                self.files.pop(row)
+                self.table.removeRow(row)
+        self._refresh_status()
+
+    def _clear_all(self):
+        self.files.clear()
+        self.table.setRowCount(0)
+        self._refresh_status()
+
+    def _browse_output_dir(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder", self.txt_output_dir.text())
+        if folder:
+            self.txt_output_dir.setText(folder)
+
+    def _refresh_status(self):
+        count = len(self.files)
+        total = sum(path.stat().st_size for path in self.files if path.exists())
+        self.lbl_status.setText(f"{count} image{'s' if count != 1 else ''} selected · {format_bytes(total)}")
+
+    def _target_for(self, source: Path) -> str:
+        selected = self.combo_format.currentText().upper()
+        if selected.startswith("KEEP"):
+            suffix = source.suffix.lower()
+            if suffix in (".jpg", ".jpeg"):
+                return "JPG"
+            if suffix in (".tif", ".tiff"):
+                return "TIFF"
+            if suffix in (".heic", ".heif"):
+                return "HEIC"
+            return suffix.lstrip(".").upper()
+        return selected
+
+    def _destination_for(self, source: Path, target_format: str) -> Path:
+        out_dir_text = self.txt_output_dir.text().strip()
+        out_dir = Path(out_dir_text) if out_dir_text else source.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ext = FORMAT_EXTENSIONS.get(target_format, source.suffix.lower()) or source.suffix.lower()
+        candidate = out_dir / f"{source.stem}_compressed{ext}"
+        counter = 2
+        while candidate.exists():
+            candidate = out_dir / f"{source.stem}_compressed_{counter}{ext}"
+            counter += 1
+        return candidate
+
+    def _execute_compress(self):
+        if not self.files:
+            QMessageBox.warning(self, "No Images", "Please add at least one image to compress.")
+            return
+
+        successes = 0
+        failures: List[str] = []
+        input_total = 0
+        output_total = 0
+        last_output_dir: Optional[Path] = None
+
+        for source in self.files:
+            try:
+                target_format = self._target_for(source)
+                destination = self._destination_for(source, target_format)
+                config = ConversionConfig(
+                    target_format=target_format,
+                    quality=self.slider_quality.value(),
+                    preserve_metadata=not self.chk_strip_metadata.isChecked(),
+                    strip_metadata=self.chk_strip_metadata.isChecked(),
+                    auto_orient=True,
+                    resize_mode="fit_box" if self.chk_resize.isChecked() else "none",
+                    custom_width=self.spin_max_width.value() if self.chk_resize.isChecked() else None,
+                    custom_height=self.spin_max_height.value() if self.chk_resize.isChecked() else None,
+                    keep_aspect_ratio=True,
+                )
+                result = self.engine.convert_single(source, destination, config)
+                if not result.success:
+                    failures.append(f"{source.name}: {result.error_message or 'compression failed'}")
+                    continue
+
+                source_size = source.stat().st_size
+                output_size = destination.stat().st_size
+                same_format = source.suffix.lower() == destination.suffix.lower()
+                if same_format and output_size > source_size:
+                    shutil.copy2(source, destination)
+                    output_size = destination.stat().st_size
+
+                successes += 1
+                input_total += source_size
+                output_total += output_size
+                last_output_dir = destination.parent
+            except Exception as exc:
+                failures.append(f"{source.name}: {exc}")
+
+        if successes:
+            saved = max(0, input_total - output_total)
+            pct = (saved / input_total * 100.0) if input_total else 0.0
+            msg = (
+                f"{successes} compressed · {format_bytes(input_total)} -> "
+                f"{format_bytes(output_total)} ({pct:.1f}% saved)"
+            )
+            self.lbl_result.setText(f"Complete: {msg}")
+            self.lbl_result.setProperty("state", "success" if not failures else "warning")
+            repolish(self.lbl_result)
+            detail = msg
+            if failures:
+                detail += f"\n\n{len(failures)} image(s) failed:\n" + "\n".join(failures[:5])
+            reply = QMessageBox.information(
+                self,
+                "Image Compression Complete" if not failures else "Image Compression Partially Complete",
+                f"{detail}\n\nOpen output folder?",
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
+            )
+            if reply == QMessageBox.StandardButton.Open and last_output_dir:
+                os.startfile(str(last_output_dir))
+            self.accept()
+        else:
+            self.lbl_result.setText("Compression failed")
+            self.lbl_result.setProperty("state", "danger")
+            repolish(self.lbl_result)
+            QMessageBox.critical(
+                self,
+                "Image Compression Failed",
+                "Could not compress the selected images:\n" + "\n".join(failures[:8]),
+            )
+
+
 class CompressDialog(QDialog):
     """Clean dialog to compress and shrink PDF file size locally."""
 
@@ -690,20 +977,20 @@ class CompressDialog(QDialog):
 
         # Header
         header = QLabel("Compress PDF File")
-        header.setStyleSheet("font-size: 16px; font-weight: 700; color: #f8fafc;")
-        sub = QLabel("Reduce file size using local image resampling and stream deflation. 100% offline.")
-        sub.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        header.setObjectName("HeaderLabel")
+        sub = QLabel("Reduce file size using image resampling and stream deflation.")
+        sub.setObjectName("MutedLabel")
         layout.addWidget(header)
         layout.addWidget(sub)
 
         # File Card
         f_card = QFrame()
-        f_card.setStyleSheet("background-color: #12141c; border-radius: 8px; padding: 10px;")
+        f_card.setObjectName("InnerCard")
         fc_layout = QHBoxLayout(f_card)
         self.lbl_file = QLabel("No PDF selected")
-        self.lbl_file.setStyleSheet("color: #cbd5e1; font-weight: 600;")
+        self.lbl_file.setObjectName("SectionTitle")
         self.lbl_size = QLabel("-")
-        self.lbl_size.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.lbl_size.setObjectName("MutedLabel")
         btn_browse = QPushButton("Choose PDF...")
         btn_browse.clicked.connect(self._browse_file)
         fc_layout.addWidget(self.lbl_file, stretch=1)
@@ -713,7 +1000,7 @@ class CompressDialog(QDialog):
 
         # Compression Profiles
         opt_group = QFrame()
-        opt_group.setStyleSheet("background-color: #1a1d26; border: 1px solid #282c38; border-radius: 8px; padding: 12px;")
+        opt_group.setObjectName("InnerCard")
         opt_layout = QVBoxLayout(opt_group)
         opt_layout.setSpacing(10)
 
@@ -736,7 +1023,7 @@ class CompressDialog(QDialog):
 
         # Result Banner
         self.lbl_result = QLabel("")
-        self.lbl_result.setStyleSheet("color: #34d399; font-weight: 600; font-size: 13px;")
+        self.lbl_result.setProperty("state", "success")
         self.lbl_result.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_result)
 
@@ -748,7 +1035,7 @@ class CompressDialog(QDialog):
         self.btn_cancel.clicked.connect(self.reject)
 
         self.btn_compress = QPushButton("Compress PDF")
-        self.btn_compress.setStyleSheet("background-color: #4f46e5; color: #ffffff; font-weight: 600; padding: 8px 18px; border-radius: 6px;")
+        set_variant(self.btn_compress, "primary")
         self.btn_compress.clicked.connect(self._execute_compress)
 
         bot_bar.addStretch()
@@ -790,8 +1077,9 @@ class CompressDialog(QDialog):
 
             if stats.get("path_taken") == "fallback-copy" or stats.get("saved_bytes", 0) <= 0:
                 msg = f"No reduction was achieved (original was already optimal at {orig_s}). Original file preserved."
-                self.lbl_result.setText(f"ℹ️ {msg}")
-                self.lbl_result.setStyleSheet("color: #94a3b8; font-weight: 600; font-size: 13px;")
+                self.lbl_result.setText(f"Note: {msg}")
+                self.lbl_result.setProperty("state", "warning")
+                repolish(self.lbl_result)
                 reply = QMessageBox.information(
                     self,
                     "No Reduction Achieved",
@@ -800,8 +1088,9 @@ class CompressDialog(QDialog):
                 )
             else:
                 msg = f"Original: {orig_s} → Compressed: {comp_s} ({pct:.1f}% space saved)"
-                self.lbl_result.setText(f"✅ {msg}")
-                self.lbl_result.setStyleSheet("color: #34d399; font-weight: 600; font-size: 13px;")
+                self.lbl_result.setText(f"Complete: {msg}")
+                self.lbl_result.setProperty("state", "success")
+                repolish(self.lbl_result)
                 reply = QMessageBox.information(
                     self,
                     "Compression Complete",
