@@ -141,8 +141,8 @@ class ImageConverterMainWindow(QMainWindow):
         self.image_tools_page = ImageToolsPage()
         self.image_tools_page.compress_requested.connect(self._open_image_compress_dialog)
         self.app_stack.addWidget(self.convert_page)
-        self.app_stack.addWidget(self.pdf_tools_page)
         self.app_stack.addWidget(self.image_tools_page)
+        self.app_stack.addWidget(self.pdf_tools_page)
         root.addWidget(self.app_stack, stretch=1)
 
         self.drag_overlay = DragOverlay(central)

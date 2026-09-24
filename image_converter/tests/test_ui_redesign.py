@@ -69,6 +69,24 @@ def test_main_window_switches_empty_queue_and_inspector_states(qapp, tmp_path: P
     window.close()
 
 
+def test_main_window_mode_buttons_show_matching_pages(qapp):
+    window = ImageConverterMainWindow()
+
+    window._set_app_mode(0)
+    assert window.app_stack.currentWidget() is window.convert_page
+    assert window.btn_mode_convert.isChecked()
+
+    window._set_app_mode(1)
+    assert window.app_stack.currentWidget() is window.image_tools_page
+    assert window.btn_mode_images.isChecked()
+
+    window._set_app_mode(2)
+    assert window.app_stack.currentWidget() is window.pdf_tools_page
+    assert window.btn_mode_pdf.isChecked()
+
+    window.close()
+
+
 def test_pdf_tool_view_has_one_primary_action(qapp):
     page = PdfToolsPage()
     for index in range(page.stack.count()):
