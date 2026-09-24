@@ -482,18 +482,21 @@ file converter/
 │   ├── requirements.txt         # Project dependencies
 │   ├── cli.py                   # Command-line interface with -v, --ocr, --strip-metadata
 │   │
-│   ├── core/                    # Core Engine & Pipelines
-│   │   ├── engine.py            # UniversalConverterEngine master dispatcher & false-success gate
-│   │   ├── com_utils.py         # Thread-isolated CoInitialize/CoUninitialize & COM security constants
-│   │   ├── pdf_tools.py         # Native PDF tools (merge, split, organize, compress)
-│   │   ├── metadata_engine.py   # Privacy & metadata engine (EXIF, PDF, DOCX, XLSX, PPTX, ODT)
-│   │   ├── document_engine.py   # PDF & Word DOCX conversion pipelines
-│   │   ├── presentation_engine.py# PowerPoint (.pptx) conversion engine with COM serialization
-│   │   ├── rich_doc_engine.py   # OpenDocument (.odt) & RTF conversion engine
-│   │   ├── data_engine.py       # CSV & Excel XLSX conversion pipelines
-│   │   ├── security.py          # Zip bomb defense, magic byte sniffing, traversal guard
-│   │   ├── ocr_engine.py        # Tesseract OCR page rendering & extraction
-│   │   └── logging_config.py    # Rotating file logger (5MB, 3 backups) & console stream
+│   ├── core/                    # Modular core services with compatibility wrappers
+│   │   ├── conversion/          # UniversalConverterEngine, image conversion, batch orchestration
+│   │   ├── documents/           # PDF and Word conversion pipelines
+│   │   ├── data/                # CSV, Excel, JSON, HTML, and table conversions
+│   │   ├── presentations/       # PowerPoint conversion pipelines
+│   │   ├── rich_documents/      # ODT and RTF conversion pipelines
+│   │   ├── pdf/                 # Merge, split, organize, rotate, extract, compress
+│   │   ├── metadata/            # Metadata inspection and stripping
+│   │   ├── ocr/                 # Tesseract OCR page rendering and extraction
+│   │   ├── safety/              # Zip-bomb defense, magic-byte sniffing, traversal guard
+│   │   ├── platform/            # Windows COM helpers and thread-local initialization
+│   │   ├── observability/       # Logging setup and logger access
+│   │   ├── engine.py            # Backward-compatible wrapper for core/conversion
+│   │   ├── pdf_tools.py         # Backward-compatible wrapper for core/pdf
+│   │   └── ...                  # Additional old-path wrappers for existing imports
 │   │
 │   ├── ui/                      # PySide6 Desktop GUI
 │   │   ├── assets/              # UI brand assets (app_icon.ico, app_icon.png)
