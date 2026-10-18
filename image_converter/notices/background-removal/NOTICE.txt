@@ -1,0 +1,20 @@
+Background-removal model notices
+
+The optional packaged fast model is the U2netp (U-2-NetP) ONNX export published
+in the rembg v0.0.0 release. The weights are not modified by this application.
+
+Model source: https://github.com/xuebinqin/U-2-Net
+Model artifact: https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx
+License: Apache License, Version 2.0 (see U2NET-LICENSE.txt)
+Upstream license: https://github.com/xuebinqin/U-2-Net/blob/master/LICENSE
+SHA-256: 309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8
+File size: 4574861 bytes
+
+The accompanying models.json preserves the registry's provenance, exact artifact
+URLs, checksums and declared licenses for all selectable model profiles. Only
+the fast weights are embedded automatically. External model weights retain
+their respective upstream terms and notices.
+
+ONNX Runtime and OpenCV are third-party runtime components. Their package data
+and distribution metadata, including available license files, are collected
+by the executable build. Optional alpha matting is excluded from this build.

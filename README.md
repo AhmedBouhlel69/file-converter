@@ -12,6 +12,7 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), OpenDocumen
 - [Supported Formats & Conversion Matrix](#-supported-formats--conversion-matrix)
 - [PDF Tools & Utilities](#-pdf-tools--utilities)
 - [Image Tools & Compression](#image-tools--compression)
+- [Background Removal](#background-removal)
 - [Installation & Quick Start](#-installation--quick-start)
   - [Prerequisites](#prerequisites)
   - [Setup Virtual Environment](#setup-virtual-environment)
@@ -47,6 +48,9 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), OpenDocumen
   - Compress batches of images to WebP, JPG, PNG, or their original format with quality and max-dimension controls.
   - Optionally strip metadata from compressed copies and keep original source files untouched.
   - Reuses the same hardened conversion engine, output validation, and local-only processing as normal image conversion.
+- **Background Removal Page**:
+  - A separate desktop page for local batch cutouts, before/after previews, transparent PNG or lossless WebP, and optional grayscale masks.
+  - Uses the optional `backgroundG` module on CPU with the small `fast` model by default; originals and existing outputs are protected.
 - **Native PDF Toolkit**:
   - **Merge**: Combine multiple PDFs and images into a single cohesive PDF with optional hierarchical bookmark/TOC generation and atomic writes.
   - **Split**: Extract exact page ranges or burst documents into individual single-page files with strict range validation.
@@ -121,10 +125,73 @@ python launch_converter.py -i ./photos -f WEBP -q 75 --width 1920 --height 1920 
 
 ---
 
+## Background Removal
+
+Open **Background Removal** in the left navigation for its own workspace. Add images,
+choose a local model and output folder, adjust optional edge/crop settings, and start
+the batch. The worker reuses one CPU model session, reports each file, and supports
+cancellation between images. Select a result to compare the source and cutout.
+
+Install the optional feature from the repository root using **Python 3.11+**:
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -r image_converter/requirements-background.txt
+
+# Only needed if the fast model is not already in backgroundG/models or the cache.
+# This explicit command downloads and verifies its pinned model artifact.
+.\venv\Scripts\bgremove.exe models pull fast --model-dir backgroundG/models
+```
+
+Normal conversion and compression remain available without this optional package.
+Inference never downloads weights or uploads images. The `fast` model is already
+present in this workspace. Other installed profiles (`balanced`, `quality`,
+`portrait`) can be selected; install their weights explicitly using the `bgremove`
+model commands. Use the page's model folder, CLI `--bg-model-dir`, or
+`BGREMOVE_MODEL_DIR` to select a directory containing the registered ONNX filenames.
+Without an explicit folder, the app checks bundled models, `backgroundG/models`,
+then the module's platform cache. Every model is verified against its registered
+SHA-256 before use. See [backgroundG/MODELS.md](backgroundG/MODELS.md) for provenance,
+model sizes, and license details.
+
+```powershell
+# Transparent PNG next to the original, using a unique photo_nobg.png name.
+python launch_converter.py photo.jpg --remove-background
+
+# Lossless WebP and a full-size grayscale PNG mask.
+python launch_converter.py photo.jpg --remove-background -o cutout.webp --save-mask
+
+# Recursive batches retain relative subdirectories in the destination.
+python launch_converter.py -i photos --remove-background -r -o cutouts
+
+# Optional edge refinement, foreground crop, and a solid background fill.
+python launch_converter.py photo.jpg --remove-background --bg-two-pass --bg-feather 0.8 --bg-edge-shift -1 --bg-crop --bg-padding 20 --bg-fill-color '#ffffff'
+```
+
+Supported inputs are **JPEG, PNG, WebP, BMP, and TIFF** (including `.jpg`, `.jpeg`,
+`.jpe`, `.bmp`, `.dib`, `.tif`, and `.tiff` aliases), up to **25 MiB** and
+**120 megapixels** per file. Animated or multi-page images are rejected. Outputs are
+PNG or lossless WebP; transparency is retained unless `--bg-fill-color` is supplied.
+The conversion option `--bg-color` belongs to the normal conversion workflow.
+EXIF/GPS is stripped by default; `--keep-metadata` opts into preserving metadata.
+Optional masks keep the oriented source dimensions even when the cutout is cropped.
+
+The default destination uses unique `_nobg` names. An explicit output filename must
+be new, match the requested format, and be used with a single input image. Existing
+source files, cutouts, and masks are protected. Resize, OCR, metadata inspection,
+and metadata cleaning are separate CLI modes. Advanced alpha matting is not included.
+
+The existing `fast` examples and integration smoke checks demonstrate the pipeline,
+not a measured quality benchmark. Fine hair, glass, low contrast, and tiny subjects
+can need manual correction. The larger profiles have not been quality validated in
+this app; their names do not establish measured performance rankings.
+
+---
+
 ## 📦 Installation & Quick Start
 
 ### Prerequisites
 - **Python 3.10+** (tested on Python 3.10 through 3.14)
+- Optional background removal requires **Python 3.11+** and the additional setup above.
 - Windows, macOS, or Linux (Native Microsoft Office COM features require Windows + Office installed)
 - Optional Windows Office automation: install Microsoft Office and the `pywin32` package (`python -m pip install pywin32`).
 - Optional OCR: install the Tesseract OCR engine; see the FAQ below.
@@ -373,11 +440,14 @@ python launch_converter.py -i ./photos -f WEBP -q 85 -o ./optimized_webp -r
 3. **Dedicated Image Tools Workspace**:
    - **Compress Images**: Batch image compression with output format, quality, resize bounds, destination folder, and metadata stripping controls.
   - Queue context menu integration lets image rows jump straight into compression.
-4. **Interactive File Preview & Privacy Badges**:
+4. **Dedicated Background Removal Page**:
+   - Local batch processing with model selection, transparent PNG/lossless WebP, optional masks, before/after preview, and edge/crop settings.
+   - CPU inference runs in a worker, reusing the loaded model; cancellation takes effect between files.
+5. **Interactive File Preview & Privacy Badges**:
    - First-page rendering for PDFs and image previews with color mode and dimensions.
    - Document summaries (paragraph, table, slide, and word counts).
    - Live privacy badge inspects file metadata and alerts user (`⚠️ Has metadata` / `🛡️ Clean`).
-5. **Queue Management & Thread Worker**:
+6. **Queue Management & Thread Worker**:
    - Background `QThread` execution ensures the UI never hangs or freezes during heavy conversions.
   - Cancellation stops queued work after the current conversion completes.
 
@@ -396,6 +466,21 @@ python build_executable.py --onefile --clean --shortcut
 ```
 
 The resulting binary is generated in `dist/UniversalFileConverter.exe`.
+
+To include background removal, install `image_converter/requirements-background.txt`
+in the build environment first. The spec collects `bgremove`, its registry, ONNX
+Runtime/OpenCV native libraries and package metadata, and embeds the verified `fast`
+weights found in `BGREMOVE_MODEL_DIR`, `backgroundG/models`, or the platform cache.
+It never downloads weights during a build. Missing dependencies produce a build
+message that the feature will be unavailable; a missing model produces instructions
+to install it explicitly or select an external model folder at runtime. A model
+checksum mismatch stops the build.
+
+The bundle includes [background-removal notices](image_converter/notices/background-removal/NOTICE.txt),
+the upstream Apache 2.0 license, and model provenance. Larger models remain external.
+The module's virtual environment, demo artifacts, and optional alpha-matting stack
+are excluded. A successful build alone does not validate its native runtime; smoke
+test a cutout on the target machine before distributing the executable.
 
 ---
 
@@ -457,6 +542,7 @@ pytest image_converter/tests/test_office_integration.py -v  # Multi-threaded Off
 pytest image_converter/tests/test_qa_audit.py -v          # Full QA audit across all formats
 pytest image_converter/tests/test_tool_dialogs.py -v      # GUI tool dialogs (offscreen)
 pytest image_converter/tests/test_security.py -v          # Zip-bomb, path traversal, magic bytes
+pytest image_converter/tests/test_background_cli.py -v    # Background-removal CLI routing and output safety
 ```
 
 ### Verification Highlights

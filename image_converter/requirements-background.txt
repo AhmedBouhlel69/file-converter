@@ -1,0 +1,4 @@
+# Run from the repository root; this installs the local backgroundG package.
+# Background removal requires Python 3.11 or newer; base conversion has a separate install.
+-r requirements.txt
+./backgroundG

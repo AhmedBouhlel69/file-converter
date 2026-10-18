@@ -84,6 +84,10 @@ def test_main_window_mode_buttons_show_matching_pages(qapp):
     assert window.app_stack.currentWidget() is window.pdf_tools_page
     assert window.btn_mode_pdf.isChecked()
 
+    window._set_app_mode(3)
+    assert window.app_stack.currentWidget() is window.background_removal_page
+    assert window.btn_mode_background.isChecked()
+
     window.close()
 
 
@@ -115,7 +119,7 @@ def test_ui_conversion_runs_existing_engine_end_to_end(qapp, tmp_path: Path):
     Image.new("RGB", (96, 64), "#6654E8").save(source)
 
     window = ImageConverterMainWindow()
-    assert window.app_stack.count() == 3
+    assert window.app_stack.count() == 4
     window.add_images([source])
     window.queue_table.set_target_format_for_row(0, "JPG")
     window.start_conversion()

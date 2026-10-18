@@ -1,0 +1,85 @@
+{
+  "fast": {
+    "name": "u2netp",
+    "file": "u2netp.onnx",
+    "sha256": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+    "input_size": [320, 320],
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225],
+    "normalize_max": true,
+    "minmax": true,
+    "licence": "Apache-2.0",
+    "commercial_use": true,
+    "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+    "source": "https://github.com/xuebinqin/U-2-Net",
+    "license_url": "https://github.com/xuebinqin/U-2-Net/blob/master/LICENSE",
+    "size_bytes": 4574861,
+    "redirect_hosts": ["release-assets.githubusercontent.com"],
+    "provenance": "rembg v0.0.0 ONNX release, asset 85857953. Downloaded 2026-10-18; SHA-256 computed locally; MD5 matches rembg U2netpSession (8e83ca70e441ab06c318d82300c84806). SHA-256 also matches fofr/comfyui revision b1d7aa4aa716f042673b8f5b4b8ed4fec88631b4. Normalization follows rembg U2netpSession."
+  },
+  "balanced": {
+    "name": "isnet-general-use",
+    "file": "isnet-general-use.onnx",
+    "sha256": "60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a",
+    "input_size": [
+      1024,
+      1024
+    ],
+    "mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "std": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "output_index": 0,
+    "output_activation": "none",
+    "normalize_max": true,
+    "minmax": true,
+    "licence": "Apache-2.0",
+    "commercial_use": true,
+    "url": "https://huggingface.co/fofr/comfyui/resolve/0cd0e3e76111f1f2e6f25091581958f381a2357e/rembg/isnet-general-use.onnx",
+    "source": "https://github.com/xuebinqin/DIS",
+    "license_url": "https://github.com/xuebinqin/DIS/blob/main/LICENSE.md",
+    "size_bytes": 178648008,
+    "redirect_hosts": ["us.aws.cdn.hf.co", "cas-bridge.xethub.hf.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.hf.co"],
+    "provenance": "Third-party mirror fofr/comfyui, immutable revision 0cd0e3e76111f1f2e6f25091581958f381a2357e, rembg/isnet-general-use.onnx. SHA-256 and exact size from Hugging Face LFS metadata on 2026-10-18. Normalization follows rembg DisSession. Artifact not locally smoke-tested; no numerical equivalence claim."
+  },
+  "quality": {
+    "name": "birefnet-general",
+    "file": "birefnet-general.onnx",
+    "sha256": "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
+    "input_size": [1024, 1024],
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225],
+    "output_activation": "sigmoid",
+    "licence": "MIT",
+    "commercial_use": true,
+    "url": "https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/534d3c82d3bb8b2f0867db6dfbc3a525b8e42f67/onnx/model.onnx",
+    "source": "https://github.com/ZhengPeng7/BiRefNet",
+    "license_url": "https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE",
+    "size_bytes": 972666916,
+    "redirect_hosts": ["us.aws.cdn.hf.co", "cas-bridge.xethub.hf.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.hf.co"],
+    "provenance": "onnx-community/BiRefNet-ONNX export, immutable revision 534d3c82d3bb8b2f0867db6dfbc3a525b8e42f67. SHA-256 and size from publisher LFS metadata on 2026-10-18. /255 normalization and output sigmoid follow that revision's preprocessor_config.json and README. Artifact not locally smoke-tested; no numerical equivalence claim."
+  },
+  "portrait": {
+    "name": "birefnet-portrait",
+    "file": "birefnet-portrait.onnx",
+    "sha256": "1ba1c8ff5a7bbfadc8d8d13fb11d7be793f91f23d9d466549e37a854f6668f99",
+    "input_size": [1024, 1024],
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225],
+    "output_activation": "sigmoid",
+    "licence": "MIT",
+    "commercial_use": true,
+    "url": "https://huggingface.co/onnx-community/BiRefNet-portrait-ONNX/resolve/dd7167f6a8b54ff7efc29a4c988938d79866464f/onnx/model.onnx",
+    "source": "https://github.com/ZhengPeng7/BiRefNet",
+    "license_url": "https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE",
+    "size_bytes": 972666916,
+    "redirect_hosts": ["us.aws.cdn.hf.co", "cas-bridge.xethub.hf.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.hf.co"],
+    "provenance": "onnx-community/BiRefNet-portrait-ONNX export, immutable revision dd7167f6a8b54ff7efc29a4c988938d79866464f. SHA-256 and size from publisher LFS metadata on 2026-10-18. /255 normalization and output sigmoid follow that revision's preprocessor_config.json and README. Artifact not locally smoke-tested; no numerical equivalence claim."
+  }
+}

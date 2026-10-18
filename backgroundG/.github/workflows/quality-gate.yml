@@ -1,0 +1,30 @@
+name: quality-regression-gate
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Repository path to baseline quality + timing JSON
+        required: true
+        type: string
+      candidate:
+        description: Repository path to candidate quality + timing JSON
+        required: true
+        type: string
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    env:
+      BASELINE_REPORT: ${{ inputs.baseline }}
+      CANDIDATE_REPORT: ${{ inputs.candidate }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install .
+      - run: bgremove gate "$BASELINE_REPORT" "$CANDIDATE_REPORT" --output gate.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-gate-result
+          path: gate.json

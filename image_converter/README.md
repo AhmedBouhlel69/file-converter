@@ -17,6 +17,10 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), CSV**, and **Images (HEIC, JPG
   - Desktop Image Tools workspace for batch compression to WebP, JPG, PNG, or original format.
   - Quality slider, max-width/max-height resize controls, custom output folder, and optional metadata stripping.
   - CLI compression through the existing `-q`, `--width`, `--height`, and `-f WEBP` options.
+- **Background Removal**:
+  - Separate top-level desktop page for batch cutouts, before/after previews, local model selection, edge/crop settings, and optional mask export.
+  - Transparent PNG or lossless WebP; defaults to the `fast` model on CPU.
+  - Optional `backgroundG` dependency (Python 3.11+) loads only when used; existing conversion remains available without it.
 - **Privacy & Complete Metadata Deletion**:
   - Strip all EXIF tags, GPS location, camera details, and comments from images (`.jpg`, `.png`, `.webp`, `.heic`, `.tiff`, `.bmp`).
   - Strip author, title, producer, timestamps, and embedded XMP streams from PDFs.
@@ -47,6 +51,11 @@ Double click `launch_converter.bat`, or run from terminal:
 ```powershell
 # Show supported formats
 .\venv\Scripts\python.exe launch_converter.py --list-formats
+
+# Local background removal (after the optional setup below)
+.\venv\Scripts\python.exe launch_converter.py photo.jpg --remove-background
+.\venv\Scripts\python.exe launch_converter.py photo.jpg --remove-background -o cutout.webp --save-mask
+.\venv\Scripts\python.exe launch_converter.py -i ./photos --remove-background -r -o ./cutouts
 
 # Inspect sensitive metadata in a file
 .\venv\Scripts\python.exe launch_converter.py --inspect-metadata photo.jpg
@@ -90,6 +99,52 @@ Double click `launch_converter.bat`, or run from terminal:
 # Batch convert an entire folder to PDF
 .\venv\Scripts\python.exe launch_converter.py -i ./docs_and_images -f PDF -o ./all_pdfs
 ```
+
+---
+
+## Optional Background Removal Setup
+
+Run these commands from the repository root using Python 3.11 or newer:
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -r image_converter/requirements-background.txt
+
+# Explicit download only when a verified fast model is not already local.
+.\venv\Scripts\bgremove.exe models pull fast --model-dir backgroundG/models
+```
+
+The app uses local ONNX models, verifies their SHA-256, and never downloads weights
+during inference. The `fast` model is already available in this workspace. Choose
+another installed profile with `--bg-model balanced|quality|portrait`; choose its
+folder using `--bg-model-dir`, the page's model-folder setting, or
+`BGREMOVE_MODEL_DIR`. The default search covers packaged models, `backgroundG/models`,
+and the module's platform cache. See [the model guide](../backgroundG/MODELS.md) for
+explicit install commands, provenance, model sizes, and licenses.
+
+JPEG, PNG, WebP, BMP, and TIFF inputs are supported up to 25 MiB and 120 MP per
+image. Animated and multi-page images are rejected. PNG is the default; WebP is
+lossless. EXIF/GPS is removed unless `--keep-metadata` is selected. Inputs and
+existing outputs are protected; generated names use a unique `_nobg` suffix.
+Recursive folder runs preserve subdirectories and exclude a nested output folder.
+Cancellation takes effect between files. Optional masks retain the oriented input
+dimensions, including when `--bg-crop` changes the cutout canvas.
+
+Advanced options are `--bg-feather`, `--bg-edge-shift`, `--bg-two-pass`, `--bg-crop`,
+and `--bg-padding`. Use `--bg-fill-color '#ffffff'` for a solid fill; omitting it
+preserves transparency. Conversion's `--bg-color`, resize, OCR, and metadata
+inspection/cleaning belong to the other CLI modes. Alpha matting is not included.
+
+The fast-model sample runs and integration smoke checks validate file processing,
+not measured segmentation quality. Hair, glass, tiny subjects, and low contrast
+may require manual correction. The larger model profiles have not been quality
+validated in this app.
+
+Build with the optional dependencies installed to include background removal in
+the executable. The spec bundles only verified local fast weights and includes
+[model notices](notices/background-removal/NOTICE.txt), the upstream license,
+registry, and native runtime libraries. No model download happens during packaging;
+the spec prints setup guidance when the runtime or model is absent. Test the
+packaged feature on the target machine before distribution.
 
 ---
 

@@ -76,6 +76,113 @@ def collect_convertible_files(path: Path, recursive: bool = False) -> List[Path]
 collect_image_files = collect_convertible_files
 
 
+def _run_background_removal(args: argparse.Namespace, in_path: Path) -> int:
+    """Route the opt-in local image tool without loading ONNX for other CLI modes."""
+    from image_converter.core.background_removal import (
+        BackgroundRemovalConfig,
+        BackgroundRemovalService,
+        IMAGE_EXTENSIONS,
+        plan_tasks,
+    )
+    from image_converter.core.logging_config import get_logger
+
+    incompatible = (
+        args.clean_metadata or args.inspect_metadata or args.ocr or
+        args.resize_percent is not None or args.width is not None or
+        args.height is not None or args.no_keep_ratio or args.no_auto_orient or
+        args.sheet_name is not None or args.password is not None or
+        args.workers is not None or args.quality != 90 or args.dpi != 150
+    )
+    if incompatible:
+        print("Error: Background removal cannot be combined with conversion, resize, OCR, metadata inspection/cleaning, or worker options.", file=sys.stderr)
+        return 1
+    if args.bg_color is not None:
+        print("Error: Use --bg-fill-color with --remove-background; its default output is transparent.", file=sys.stderr)
+        return 1
+    if args.keep_metadata and (args.strip_metadata or args.no_metadata):
+        print("Error: --keep-metadata cannot be combined with --strip-metadata or --no-metadata.", file=sys.stderr)
+        return 1
+
+    out_arg = Path(args.output_path) if args.output_path else None
+    explicit_output = out_arg if out_arg and not out_arg.is_dir() and out_arg.suffix else None
+    if explicit_output is not None and in_path.is_dir():
+        print("Error: A directory input requires an output directory; use a single image for an explicit output filename.", file=sys.stderr)
+        return 1
+    excluded_output_root = None
+    if in_path.is_dir() and out_arg is not None and explicit_output is None:
+        source_root = in_path.resolve()
+        output_root = out_arg.resolve()
+        if output_root != source_root and output_root.is_relative_to(source_root):
+            excluded_output_root = output_root
+
+    supported = {extension.lower() for extension in IMAGE_EXTENSIONS}
+    if in_path.is_dir():
+        iterator = in_path.rglob("*") if args.recursive else in_path.glob("*")
+        inputs = sorted(
+            path for path in iterator
+            if path.is_file() and path.suffix.lower() in supported
+            and (excluded_output_root is None or not path.resolve().is_relative_to(excluded_output_root))
+        )
+    else:
+        inputs = [in_path] if in_path.suffix.lower() in supported else []
+    if not inputs:
+        print("Error: No background-removal images found. Supported inputs: JPG, JPEG, PNG, WebP, BMP, TIF, TIFF.", file=sys.stderr)
+        return 1
+
+    target_format = (args.target_format or (explicit_output.suffix[1:] if explicit_output else "PNG")).upper()
+    if target_format not in {"PNG", "WEBP"}:
+        print("Error: Background removal supports PNG or lossless WEBP output only.", file=sys.stderr)
+        return 1
+    if explicit_output and explicit_output.suffix.lower() != f".{target_format.lower()}":
+        print("Error: Output filename extension must match the background-removal format (PNG or WEBP).", file=sys.stderr)
+        return 1
+
+    try:
+        config = BackgroundRemovalConfig(
+            model=args.bg_model or "fast",
+            model_dir=Path(args.bg_model_dir) if args.bg_model_dir else None,
+            output_format=target_format,
+            bg_color=("#{:02x}{:02x}{:02x}".format(*args.bg_fill_color) if args.bg_fill_color is not None else None),
+            crop=args.bg_crop,
+            padding=args.bg_padding or 0,
+            feather=args.bg_feather or 0,
+            edge_shift=args.bg_edge_shift or 0,
+            two_pass=args.bg_two_pass,
+            save_mask=args.save_mask,
+            keep_metadata=args.keep_metadata,
+        )
+        tasks = plan_tasks(
+            inputs,
+            output_dir=None if explicit_output else out_arg,
+            output_format=target_format,
+            explicit_output=explicit_output,
+            save_mask=args.save_mask,
+            input_root=in_path if in_path.is_dir() else None,
+        )
+        service = BackgroundRemovalService(config)
+        print(f"\nRemoving backgrounds from {len(tasks)} image(s) -> {target_format}, model: {config.model}, CPU...")
+
+        def on_progress(completed: int, total: int, result: ConversionResult):
+            if result.success:
+                print(f"[{completed}/{total}] OK: {Path(result.input_path).name} -> {result.output_path}")
+            else:
+                print(f"[{completed}/{total}] FAILED: {Path(result.input_path).name} - {result.error_message}", file=sys.stderr)
+
+        results = service.run_batch(tasks, progress_callback=on_progress)
+    except KeyboardInterrupt:
+        print("\nBackground removal interrupted.", file=sys.stderr)
+        return 130
+    except (ImportError, OSError, ValueError, RuntimeError) as error:
+        get_logger("cli").error("Background removal failed: %s", error)
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+    successes = sum(result.success for result in results)
+    failures = len(results) - successes
+    print(f"\nCompleted: {successes} succeeded, {failures} failed.")
+    return 0 if failures == 0 else 1
+
+
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Universal File Converter: Convert Images, PDF, Word (DOCX), CSV, and Excel (XLSX) files."
@@ -172,9 +279,21 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--bg-color",
         type=parse_color,
-        default="#ffffff",
+        default=None,
         help="Solid background color for transparent images when converting to JPG/BMP (hex '#ffffff' or '255,255,255').",
     )
+    background = parser.add_argument_group("Local background removal (optional Python 3.11+ module)")
+    background.add_argument("--remove-background", action="store_true", help="Remove image backgrounds locally on CPU; transparent PNG by default.")
+    background.add_argument("--bg-model", choices=("fast", "balanced", "quality", "portrait"), default=None, help="Installed segmentation model (default: fast); never downloads automatically.")
+    background.add_argument("--bg-model-dir", default=None, help="Directory containing verified local ONNX model files.")
+    background.add_argument("--save-mask", action="store_true", help="Also export the full-size grayscale mask as PNG.")
+    background.add_argument("--bg-feather", type=float, default=None, help="Mask feather radius in pixels (default: 0).")
+    background.add_argument("--bg-edge-shift", type=int, default=None, help="Expand (+) or contract (-) mask edges in pixels (default: 0).")
+    background.add_argument("--bg-two-pass", action="store_true", help="Refine the detected subject using a second inference pass.")
+    background.add_argument("--bg-crop", action="store_true", help="Crop output around the detected foreground.")
+    background.add_argument("--bg-padding", type=int, default=None, help="Padding around cropped foreground in pixels (default: 0).")
+    background.add_argument("--bg-fill-color", type=parse_color, default=None, help="Optional solid fill for removed pixels; omit to keep transparency.")
+    background.add_argument("--keep-metadata", action="store_true", help="Preserve image metadata in background-removal output (default: strip EXIF/GPS).")
     parser.add_argument(
         "--dpi",
         type=int,
@@ -245,6 +364,16 @@ def main(argv: List[str] | None = None) -> int:
     setup_logger(verbose=args.verbose, log_file=args.log_file)
     logger = get_logger("cli")
 
+    background_options_used = any((
+        args.bg_model is not None, args.bg_model_dir is not None, args.save_mask,
+        args.bg_feather is not None, args.bg_edge_shift is not None, args.bg_two_pass,
+        args.bg_crop, args.bg_padding is not None, args.bg_fill_color is not None,
+        args.keep_metadata,
+    ))
+    if background_options_used and not args.remove_background:
+        print("Error: Background-removal options require --remove-background.", file=sys.stderr)
+        return 1
+
     if args.list_formats:
         print("\n=== Universal File Converter Formats ===")
         print("\n[Images]")
@@ -265,6 +394,9 @@ def main(argv: List[str] | None = None) -> int:
         print("  " + ", ".join(get_supported_input_extensions()))
         print("All Output Formats:")
         print("  " + ", ".join(get_supported_output_formats()) + "\n")
+        print("[Background Removal]")
+        print("  --remove-background: JPG/JPEG, PNG, WEBP, BMP, TIF/TIFF -> transparent PNG or lossless WEBP")
+        print("  Optional Python 3.11+ local module and a verified model are required. Default: fast, CPU.\n")
         return 0
 
     input_target = args.input_path or args.positional_input
@@ -276,6 +408,9 @@ def main(argv: List[str] | None = None) -> int:
     if not in_path.exists():
         print(f"Error: Input path does not exist: {in_path}", file=sys.stderr)
         return 1
+
+    if args.remove_background:
+        return _run_background_removal(args, in_path)
 
     files_to_process = collect_convertible_files(in_path, recursive=args.recursive)
     if not files_to_process:
@@ -345,7 +480,7 @@ def main(argv: List[str] | None = None) -> int:
         custom_width=args.width,
         custom_height=args.height,
         keep_aspect_ratio=not args.no_keep_ratio,
-        background_color=args.bg_color,
+        background_color=args.bg_color or (255, 255, 255),
         dpi=args.dpi,
         sheet_name=args.sheet_name,
         password=args.password,

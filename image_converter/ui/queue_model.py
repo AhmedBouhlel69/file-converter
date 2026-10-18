@@ -606,6 +606,7 @@ class QueueTableView(QTableView):
     tool_organize_requested = Signal(object)
     tool_compress_requested = Signal(object)
     tool_image_compress_requested = Signal(list)
+    tool_background_removal_requested = Signal(list)
     retry_requested = Signal(int)
 
     def __init__(self, parent=None):
@@ -753,7 +754,7 @@ class QueueTableView(QTableView):
         retry = None
         if self.queue_model.entry(row).status == "Failed":
             retry = menu.addAction("Retry conversion")
-        split = organize = compress = image_compress = None
+        split = organize = compress = image_compress = background_removal = None
         if len(selected) == 1 and path.suffix.lower() == ".pdf":
             split = menu.addAction("Split PDF…")
             organize = menu.addAction("Organize pages…")
@@ -763,6 +764,12 @@ class QueueTableView(QTableView):
         if selected_images:
             image_compress = menu.addAction(
                 f"Compress {len(selected_images)} image{'s' if len(selected_images) != 1 else ''}…"
+            )
+        from image_converter.core.background_removal import IMAGE_EXTENSIONS
+        removal_images = [candidate for candidate in selected if candidate.suffix.lower() in IMAGE_EXTENSIONS]
+        if removal_images:
+            background_removal = menu.addAction(
+                f"Remove background from {len(removal_images)} image{'s' if len(removal_images) != 1 else ''}…"
             )
         merge = menu.addAction(f"Merge {len(selected)} selected file{'s' if len(selected) != 1 else ''}…")
         menu.addSeparator()
@@ -785,6 +792,8 @@ class QueueTableView(QTableView):
             self.tool_compress_requested.emit(path)
         elif image_compress and chosen == image_compress:
             self.tool_image_compress_requested.emit(selected_images)
+        elif background_removal and chosen == background_removal:
+            self.tool_background_removal_requested.emit(removal_images)
         elif chosen == merge:
             self.tool_merge_requested.emit(selected)
         elif chosen == remove:

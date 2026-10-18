@@ -38,6 +38,7 @@ from image_converter.ui.components import (
     format_bytes,
 )
 from image_converter.ui.image_tools_page import ImageToolsPage
+from image_converter.ui.background_removal_page import BackgroundRemovalPage
 from image_converter.ui.pdf_tools_page import PdfToolsPage
 from image_converter.ui.queue_model import QueueTableView
 from image_converter.ui.stats_widget import StatsWidget
@@ -140,9 +141,12 @@ class ImageConverterMainWindow(QMainWindow):
         self.pdf_tools_page.compress_requested.connect(self._open_compress_dialog)
         self.image_tools_page = ImageToolsPage()
         self.image_tools_page.compress_requested.connect(self._open_image_compress_dialog)
+        self.background_removal_page = BackgroundRemovalPage()
+        self.background_removal_page.queue_requested.connect(self._use_queue_for_background_removal)
         self.app_stack.addWidget(self.convert_page)
         self.app_stack.addWidget(self.image_tools_page)
         self.app_stack.addWidget(self.pdf_tools_page)
+        self.app_stack.addWidget(self.background_removal_page)
         root.addWidget(self.app_stack, stretch=1)
 
         self.drag_overlay = DragOverlay(central)
@@ -194,7 +198,8 @@ class ImageConverterMainWindow(QMainWindow):
         self.btn_mode_convert = QPushButton("Convert")
         self.btn_mode_images = QPushButton("Image Tools")
         self.btn_mode_pdf = QPushButton("PDF Tools")
-        for index, button in enumerate((self.btn_mode_convert, self.btn_mode_images, self.btn_mode_pdf)):
+        self.btn_mode_background = QPushButton("Remove Background")
+        for index, button in enumerate((self.btn_mode_convert, self.btn_mode_images, self.btn_mode_pdf, self.btn_mode_background)):
             button.setCheckable(True)
             set_variant(button, "mode")
             self.mode_group.addButton(button, index)
@@ -301,6 +306,7 @@ class ImageConverterMainWindow(QMainWindow):
         self.queue_table.tool_organize_requested.connect(self._open_organize_dialog_with_file)
         self.queue_table.tool_compress_requested.connect(self._open_compress_dialog_with_file)
         self.queue_table.tool_image_compress_requested.connect(self._open_image_compress_dialog_with_files)
+        self.queue_table.tool_background_removal_requested.connect(self._open_background_removal_with_files)
         self.queue_table.retry_requested.connect(self._retry_row)
         self.queue_table.selectionModel().selectionChanged.connect(self._on_queue_selection_changed)
         model = self.queue_table.queue_model
@@ -410,11 +416,12 @@ class ImageConverterMainWindow(QMainWindow):
     def _set_app_mode(self, index: int):
         if not hasattr(self, "app_stack"):
             return
-        index = 0 if index not in (0, 1, 2) else index
+        index = 0 if index not in (0, 1, 2, 3) else index
         self.app_stack.setCurrentIndex(index)
         self.btn_mode_convert.setChecked(index == 0)
         self.btn_mode_images.setChecked(index == 1)
         self.btn_mode_pdf.setChecked(index == 2)
+        self.btn_mode_background.setChecked(index == 3)
         self.btn_add_files.setVisible(index == 0)
         self.btn_add_folder.setVisible(index == 0)
 
@@ -424,7 +431,9 @@ class ImageConverterMainWindow(QMainWindow):
             self.drag_overlay.setGeometry(self.centralWidget().rect().adjusted(4, 4, -4, -4))
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and not self._is_converting:
+        background_active = self.app_stack.currentWidget() is self.background_removal_page
+        busy = self.background_removal_page.is_running if background_active else self._is_converting
+        if event.mimeData().hasUrls() and not busy:
             event.acceptProposedAction()
             self.drag_overlay.setGeometry(self.centralWidget().rect().adjusted(4, 4, -4, -4))
             self.drag_overlay.show()
@@ -433,7 +442,9 @@ class ImageConverterMainWindow(QMainWindow):
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls() and not self._is_converting:
+        background_active = self.app_stack.currentWidget() is self.background_removal_page
+        busy = self.background_removal_page.is_running if background_active else self._is_converting
+        if event.mimeData().hasUrls() and not busy:
             event.acceptProposedAction()
 
     def dragLeaveEvent(self, event):
@@ -442,6 +453,9 @@ class ImageConverterMainWindow(QMainWindow):
 
     def dropEvent(self, event):
         self.drag_overlay.hide()
+        if self.app_stack.currentWidget() is self.background_removal_page:
+            self.background_removal_page.dropEvent(event)
+            return
         paths: List[Path] = []
         for url in event.mimeData().urls():
             candidate = Path(url.toLocalFile())
@@ -457,7 +471,6 @@ class ImageConverterMainWindow(QMainWindow):
             ("Ctrl+O", self._add_files_dialog),
             ("Ctrl+Shift+O", self._add_folder_dialog),
             ("Ctrl+Return", self.start_conversion),
-            ("Delete", self._remove_selected),
             ("Escape", self._cancel_conversion),
         )
         self._shortcuts = []
@@ -465,12 +478,18 @@ class ImageConverterMainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(keys), self)
             shortcut.activated.connect(handler)
             self._shortcuts.append(shortcut)
+        for queue in (self.queue_table, self.background_removal_page.file_list):
+            shortcut = QShortcut(QKeySequence("Delete"), queue)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(self._remove_selected)
+            self._shortcuts.append(shortcut)
 
     def _setup_tab_order(self):
         widgets = [
             self.btn_mode_convert,
             self.btn_mode_images,
             self.btn_mode_pdf,
+            self.btn_mode_background,
             self.btn_add_files,
             self.btn_add_folder,
             self.btn_remove_item,
@@ -577,6 +596,9 @@ class ImageConverterMainWindow(QMainWindow):
     add_files = add_images
 
     def _add_files_dialog(self):
+        if self.app_stack.currentWidget() is self.background_removal_page:
+            self.background_removal_page.browse_images()
+            return
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Choose files to convert",
@@ -591,11 +613,19 @@ class ImageConverterMainWindow(QMainWindow):
             self.add_images([Path(path) for path in files])
 
     def _add_folder_dialog(self):
+        if self.app_stack.currentWidget() is self.background_removal_page:
+            folder = QFileDialog.getExistingDirectory(self, "Choose images folder")
+            if folder:
+                self.background_removal_page.add_files([Path(folder)])
+            return
         folder = QFileDialog.getExistingDirectory(self, "Choose a folder")
         if folder:
             self.add_images(collect_convertible_files(Path(folder), recursive=True))
 
     def _remove_selected(self):
+        if self.app_stack.currentWidget() is self.background_removal_page:
+            self.background_removal_page.remove_selected()
+            return
         if self._is_converting:
             return
         rows = self.queue_table.get_selected_rows()
@@ -662,6 +692,9 @@ class ImageConverterMainWindow(QMainWindow):
             self.start_conversion()
 
     def start_conversion(self, rows: Optional[List[int]] = None):
+        if self.app_stack.currentWidget() is self.background_removal_page:
+            self.background_removal_page.start()
+            return
         if self._is_converting:
             return
         model = self.queue_table.queue_model
@@ -803,6 +836,9 @@ class ImageConverterMainWindow(QMainWindow):
         self.lbl_status_hint.setText("Completed outputs were kept. Adjust the batch or convert again.")
 
     def _cancel_conversion(self):
+        if self.app_stack.currentWidget() is self.background_removal_page:
+            self.background_removal_page.cancel()
+            return
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.btn_convert_all.setEnabled(False)
@@ -848,6 +884,28 @@ class ImageConverterMainWindow(QMainWindow):
 
     def _open_image_compress_dialog_with_files(self, paths: List[Path]):
         ImageCompressDialog(initial_files=paths, parent=self).exec()
+
+    def _open_background_removal_with_files(self, paths: List[Path]):
+        self._set_app_mode(3)
+        self.background_removal_page.add_files(paths)
+
+    def _use_queue_for_background_removal(self):
+        self.background_removal_page.add_files(self._get_selected_or_all_paths())
+
+    def closeEvent(self, event):
+        if self.background_removal_page.is_running:
+            self.background_removal_page.cancel()
+            self.background_removal_page._set_status(
+                "Cancelling the current batch. Close the window again when it finishes.", "warning"
+            )
+            event.ignore()
+            return
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.lbl_status_hint.setText("Cancelling the conversion. Close the window again when it finishes.")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _get_selected_or_all_paths(self) -> List[Path]:
         selected = self.queue_table.get_selected_file_paths()
