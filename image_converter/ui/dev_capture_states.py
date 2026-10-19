@@ -7,8 +7,10 @@ Run from the repository root:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # This must be configured before any Qt import.
@@ -18,13 +20,17 @@ import fitz
 from docx import Document
 from openpyxl import Workbook
 from PIL import Image, ImageDraw
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QDialog, QGridLayout, QLabel, QSpinBox,
+)
 
 from image_converter.ui.main_window import ImageConverterMainWindow
 from image_converter.ui.theme import apply_theme, set_variant
+from image_converter.ui.tool_dialogs import (
+    CompressDialog, ImageCompressDialog, MergeDialog, OrganizePagesDialog, SplitDialog,
+)
 
 
 def _load_offscreen_font() -> None:
@@ -49,7 +55,7 @@ def _create_samples(folder: Path) -> list[Path]:
     for number in range(1, 4):
         page = pdf.new_page()
         page.insert_text((72, 96), f"Quarterly report — page {number}", fontsize=20)
-    pdf.save(pdf_path)
+    pdf_path.write_bytes(pdf.tobytes())
     pdf.close()
 
     document_path = folder / "meeting-notes.docx"
@@ -70,8 +76,10 @@ def _create_samples(folder: Path) -> list[Path]:
 
 
 def _settle(app: QApplication, milliseconds: int = 250) -> None:
-    app.processEvents()
-    QTest.qWait(milliseconds)
+    deadline = time.monotonic() + milliseconds / 1000
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
     app.processEvents()
 
 
@@ -104,7 +112,10 @@ def capture_states(output_dir: Path, width: int = 1380, height: int = 860) -> li
     window.drag_overlay.hide()
 
     samples = _create_samples(output_dir / "samples")
-    window.add_images(samples)
+    window.add_images(samples[:1])
+    _settle(app, 500)
+    capture("03-single-type")
+    window.add_images(samples[1:])
     _settle(app, 1100)
     capture("03-populated-mixed")
 
@@ -128,17 +139,19 @@ def capture_states(output_dir: Path, width: int = 1380, height: int = 860) -> li
     capture("05-converting")
 
     window._is_converting = False
-    window._footer_state = "completed"
     window._set_queue_editing_enabled(True)
-    for row, entry in enumerate(model.entries):
-        model.update_status(row, "Done", progress=100)
-        model.update_output_size(row, max(1, int(entry.input_size * 0.72)))
-    window.progress_bar.hide()
-    window.btn_open_folder.show()
-    window.btn_convert_more.show()
-    window.lbl_status.setText(f"{model.rowCount()} converted · 1.4 MB → 980 KB")
-    window.lbl_status_hint.setText("Completed in 1.42s. Your originals were not changed.")
-    window._refresh_queue_ui(update_status=False)
+    for row, target in enumerate(("WEBP", "TXT", "TXT", "CSV")):
+        window.queue_table.set_target_format_for_row(row, target)
+    window.start_conversion()
+    deadline = time.monotonic() + 20
+    while window._is_converting and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    if window._is_converting:
+        window._cancel_conversion()
+        raise RuntimeError("Sample conversion did not finish within 20 seconds")
+    if any(entry.status not in ("Done", "Warning") for entry in model.entries):
+        raise RuntimeError("A sample conversion failed; completed captures must use real outputs")
     capture("06-completed")
 
     model.update_status(0, "Failed", progress=0, error="The sample file could not be decoded.")
@@ -151,11 +164,97 @@ def capture_states(output_dir: Path, width: int = 1380, height: int = 860) -> li
     capture("07-error")
 
     window._set_app_mode(1)
-    capture("08-pdf-tools")
+    capture("08-image-tools")
+    window._set_app_mode(2)
+    for index, name in enumerate(("merge", "split", "organize", "compress")):
+        window.pdf_tools_page.set_active_tool(index)
+        capture(f"09-pdf-{name}")
+    window._set_app_mode(3)
+    window.background_removal_page.add_files([samples[0]])
+    capture("10-background")
+    window.background_removal_page.btn_advanced.setChecked(True)
+    capture("11-background-advanced")
 
     window.close()
     QThreadPool.globalInstance().waitForDone(3000)
     app.processEvents()
+    captured.extend(capture_dialogs(output_dir, samples, width, height))
+    (output_dir / "manifest.json").write_text(json.dumps({
+        "logical_size": [width, height],
+        "platform": app.platformName(),
+        "captures": [path.name for path in captured],
+        "fixtures": "Running and failure queue states are layout fixtures. Completed sizes come from a real sample batch.",
+        "native_windows_dpi_or_assistive_technology_verified": False,
+    }, indent=2), encoding="utf-8")
+    return captured
+
+
+def capture_dialogs(output_dir: Path, samples: list[Path], width: int, height: int) -> list[Path]:
+    """Render every utility dialog plus checked/mixed/disabled/focused controls."""
+    app = QApplication.instance()
+    captured = []
+    dialogs = (
+        ("merge", lambda: MergeDialog(initial_files=samples[:2])),
+        ("split", lambda: SplitDialog(initial_file=samples[1])),
+        ("organize", lambda: OrganizePagesDialog(initial_file=samples[1])),
+        ("compress-pdf", lambda: CompressDialog(initial_file=samples[1])),
+        ("compress-images", lambda: ImageCompressDialog(initial_files=[samples[0]])),
+    )
+    for name, factory in dialogs:
+        dialog = factory()
+        dialog.resize(width, height)
+        dialog.show()
+        _settle(app)
+        path = output_dir / f"12-dialog-{name}.png"
+        if not dialog.grab().save(str(path)):
+            raise RuntimeError(f"Could not save {path}")
+        captured.append(path)
+        dialog.close()
+    dialog = QDialog()
+    dialog.setWindowTitle("Control state audit")
+    apply_theme(dialog)
+    grid = QGridLayout(dialog)
+    for row, (name, state, enabled) in enumerate((
+        ("Unchecked", Qt.CheckState.Unchecked, True),
+        ("Checked", Qt.CheckState.Checked, True),
+        ("Indeterminate", Qt.CheckState.PartiallyChecked, True),
+        ("Disabled unchecked", Qt.CheckState.Unchecked, False),
+        ("Disabled checked", Qt.CheckState.Checked, False),
+        ("Disabled indeterminate", Qt.CheckState.PartiallyChecked, False),
+    )):
+        check = QCheckBox(name)
+        check.setAccessibleName(name)
+        check.setTristate(True)
+        check.setCheckState(state)
+        check.setEnabled(enabled)
+        grid.addWidget(check, row, 0)
+        spin = QSpinBox()
+        spin.setAccessibleName(f"{name} stepper")
+        spin.setRange(0, 100)
+        spin.setValue(42)
+        spin.setEnabled(enabled)
+        grid.addWidget(spin, row, 1)
+    focused = QCheckBox("Keyboard focus")
+    focused.setAccessibleName("Focused checkbox")
+    focused.setChecked(True)
+    grid.addWidget(focused, 6, 0)
+    for row, (name, value) in enumerate((("Minimum", 0), ("Maximum", 100)), start=7):
+        grid.addWidget(QLabel(name), row, 0)
+        spin = QSpinBox()
+        spin.setAccessibleName(f"{name} stepper")
+        spin.setRange(0, 100)
+        spin.setValue(value)
+        grid.addWidget(spin, row, 1)
+    grid.addWidget(QLabel("Tab to inspect checkbox and spinbox focus."), 9, 0, 1, 2)
+    dialog.resize(width, height)
+    dialog.show()
+    focused.setFocus(Qt.FocusReason.TabFocusReason)
+    _settle(app)
+    path = output_dir / "13-control-states.png"
+    if not dialog.grab().save(str(path)):
+        raise RuntimeError(f"Could not save {path}")
+    captured.append(path)
+    dialog.close()
     return captured
 
 

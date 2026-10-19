@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPalette
 from PySide6.QtWidgets import QLabel, QWidget
 
 
@@ -69,21 +70,29 @@ TOKENS = {
     "secondary": TYPE_SCALE["secondary"],
     "eyebrow": TYPE_SCALE["eyebrow"],
     "chevron_down": CHEVRON_DOWN,
+    "chevron_up": (ASSET_DIR / "chevron-up.svg").as_posix(),
+    "spin_down": (ASSET_DIR / "spin-down.svg").as_posix(),
+    "chevron_up_disabled": (ASSET_DIR / "chevron-up-disabled.svg").as_posix(),
+    "chevron_down_disabled": (ASSET_DIR / "chevron-down-disabled.svg").as_posix(),
+    "check_mark": (ASSET_DIR / "check-mark.svg").as_posix(),
+    "check_partial": (ASSET_DIR / "check-partial.svg").as_posix(),
+    "radio_dot": (ASSET_DIR / "radio-dot.svg").as_posix(),
 }
 
 
 QSS_TEMPLATE = r"""
+QWidget {{
+    background-color: transparent;
+    color: {text_primary};
+    font-family: "Segoe UI", Arial, sans-serif;
+}}
+
+/* Keep opaque top-level surfaces after the transparent child-widget rule. */
 QMainWindow, QDialog, QWidget#centralWidget {{
     background-color: {bg};
     color: {text_primary};
     font-family: "Segoe UI", Arial, sans-serif;
     font-size: {body}px;
-}}
-
-QWidget {{
-    background-color: transparent;
-    color: {text_primary};
-    font-family: "Segoe UI", Arial, sans-serif;
 }}
 
 QToolTip {{
@@ -365,10 +374,78 @@ QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     padding: 6px 9px;
 }}
 
-QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {{
+QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {{
     background-color: #0B1725;
     color: {disabled};
     border-color: #30445B;
+}}
+
+QSpinBox, QDoubleSpinBox {{
+    padding-right: 29px;
+    min-height: 20px;
+}}
+
+QSpinBox:focus, QDoubleSpinBox:focus {{
+    padding-right: 28px;
+}}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 24px;
+    background-color: {surface_2};
+    border-left: 1px solid {border};
+    border-top-right-radius: 9px;
+}}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 24px;
+    background-color: {surface_2};
+    border-left: 1px solid {border};
+    border-top: 1px solid {border};
+    border-bottom-right-radius: 9px;
+}}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+    background-color: #29415E;
+}}
+
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed,
+QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {{
+    background-color: {selection};
+}}
+
+QSpinBox::up-button:disabled, QSpinBox::down-button:disabled,
+QDoubleSpinBox::up-button:disabled, QDoubleSpinBox::down-button:disabled,
+QSpinBox::up-button:off, QSpinBox::down-button:off,
+QDoubleSpinBox::up-button:off, QDoubleSpinBox::down-button:off {{
+    background-color: #0B1725;
+    border-color: #30445B;
+}}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: url("{chevron_up}");
+    width: 14px;
+    height: 14px;
+}}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: url("{spin_down}");
+    width: 14px;
+    height: 14px;
+}}
+
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
+QSpinBox::up-arrow:off, QDoubleSpinBox::up-arrow:off {{
+    image: url("{chevron_up_disabled}");
+}}
+
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled,
+QSpinBox::down-arrow:off, QDoubleSpinBox::down-arrow:off {{
+    image: url("{chevron_down_disabled}");
 }}
 
 QComboBox::drop-down {{
@@ -413,12 +490,12 @@ QCheckBox::indicator, QRadioButton::indicator {{
     width: 16px;
     height: 16px;
     background-color: #091625;
-    border: 1px solid #65809E;
+    border: 2px solid #65809E;
     border-radius: 4px;
 }}
 
 QRadioButton::indicator {{
-    border-radius: 8px;
+    border-radius: 10px;
 }}
 
 QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
@@ -430,8 +507,36 @@ QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
     border-color: #A89DFF;
 }}
 
-QCheckBox:focus, QRadioButton:focus {{
-    color: {focus_ring};
+QCheckBox::indicator:checked {{
+    image: url("{check_mark}");
+}}
+
+QCheckBox::indicator:indeterminate {{
+    background-color: {accent};
+    border-color: #A89DFF;
+    image: url("{check_partial}");
+}}
+
+QRadioButton::indicator:checked {{
+    image: url("{radio_dot}");
+}}
+
+QCheckBox:disabled, QRadioButton:disabled {{
+    color: {disabled};
+}}
+
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+    background-color: #0B1725;
+    border-color: #30445B;
+}}
+
+QCheckBox::indicator:checked:disabled, QCheckBox::indicator:indeterminate:disabled,
+QRadioButton::indicator:checked:disabled {{
+    background-color: #25344A;
+}}
+
+QCheckBox::indicator:focus, QRadioButton::indicator:focus {{
+    border-color: {focus_ring};
 }}
 
 QGroupBox {{
@@ -642,6 +747,28 @@ DARK_STYLESHEET = QSS_TEMPLATE.format(**TOKENS)
 def apply_theme(target) -> None:
     """Install the one centralized stylesheet on an app or top-level widget."""
     target.setStyleSheet(DARK_STYLESHEET)
+
+
+def apply_dialog_theme(dialog: QWidget) -> None:
+    """Give standalone utility dialogs explicit surfaces under any OS palette."""
+    palette = QPalette(dialog.palette())
+    colors = {
+        QPalette.ColorRole.Window: BG,
+        QPalette.ColorRole.WindowText: TEXT_PRIMARY,
+        QPalette.ColorRole.Text: TEXT_PRIMARY,
+        QPalette.ColorRole.Base: "#091625",
+        QPalette.ColorRole.Button: SURFACE_2,
+        QPalette.ColorRole.ButtonText: TEXT_PRIMARY,
+        QPalette.ColorRole.Highlight: ACCENT,
+        QPalette.ColorRole.HighlightedText: "#FFFFFF",
+    }
+    for role, color in colors.items():
+        palette.setColor(role, QColor(color))
+    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(DISABLED))
+    dialog.setPalette(palette)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    apply_theme(dialog)
 
 
 def repolish(widget: QWidget) -> None:

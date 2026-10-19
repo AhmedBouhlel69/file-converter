@@ -60,7 +60,7 @@ from image_converter.core.pdf_tools import (
     split_pdf,
 )
 from image_converter.ui.components import format_bytes
-from image_converter.ui.theme import icon, repolish, set_variant
+from image_converter.ui.theme import apply_dialog_theme, icon, repolish, set_variant
 
 
 def fitz_page_to_qpixmap(page: fitz.Page, dpi: int = 72) -> QPixmap:
@@ -82,6 +82,7 @@ class MergeDialog(QDialog):
 
     def __init__(self, initial_files: Optional[List[Path]] = None, parent=None):
         super().__init__(parent)
+        apply_dialog_theme(self)
         self.setWindowTitle("Merge Files to PDF")
         self.resize(650, 520)
         self.setMinimumSize(500, 400)
@@ -289,6 +290,7 @@ class SplitDialog(QDialog):
 
     def __init__(self, initial_file: Optional[Path] = None, parent=None):
         super().__init__(parent)
+        apply_dialog_theme(self)
         self.setWindowTitle("Split PDF")
         self.resize(520, 420)
 
@@ -465,6 +467,7 @@ class OrganizePagesDialog(QDialog):
 
     def __init__(self, initial_file: Optional[Path] = None, parent=None):
         super().__init__(parent)
+        apply_dialog_theme(self)
         self.setWindowTitle("Reorganize PDF Pages")
         self.resize(780, 560)
 
@@ -682,6 +685,7 @@ class ImageCompressDialog(QDialog):
 
     def __init__(self, initial_files: Optional[List[Path]] = None, parent=None):
         super().__init__(parent)
+        apply_dialog_theme(self)
         self.setWindowTitle("Compress Images")
         self.resize(680, 540)
         self.setMinimumSize(560, 430)
@@ -962,6 +966,7 @@ class CompressDialog(QDialog):
 
     def __init__(self, initial_file: Optional[Path] = None, parent=None):
         super().__init__(parent)
+        apply_dialog_theme(self)
         self.setWindowTitle("Compress PDF")
         self.resize(500, 360)
 

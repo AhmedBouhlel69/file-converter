@@ -76,6 +76,50 @@ def assert_theme_contrast() -> dict[str, float]:
     return ratios
 
 
+def assert_rendered_label_contrast(surface, minimum: float = 4.5) -> dict[str, float]:
+    """Audit visible labels against their rendered, opaque backing surface.
+
+    Call after showing/polishing the widget. Label perimeters avoid glyph pixels;
+    sampling the render also catches a transparent dialog root, which a token
+    or palette-only audit would miss.
+    """
+    from collections import Counter
+
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QLabel
+
+    rendered = surface.grab().toImage()
+    device_ratio = rendered.devicePixelRatio()
+    ratios: dict[str, float] = {}
+    failures = []
+    for index, label in enumerate(surface.findChildren(QLabel)):
+        if not label.text() or not label.isVisibleTo(surface) or label.width() < 2 or label.height() < 2:
+            continue
+        origin = label.mapTo(surface, QPoint(0, 0))
+        # Sample the whole perimeter so a glyph touching one corner cannot
+        # masquerade as the background (notably with fallback fonts).
+        perimeter = [origin + QPoint(x, y) for x in range(label.width()) for y in (0, label.height() - 1)]
+        perimeter.extend(origin + QPoint(x, y) for y in range(1, label.height() - 1) for x in (0, label.width() - 1))
+        physical_points = [QPoint(round(point.x() * device_ratio), round(point.y() * device_ratio)) for point in perimeter]
+        samples = [rendered.pixelColor(point) for point in physical_points if rendered.rect().contains(point)]
+        if not samples:
+            continue
+        background = QColor.fromRgba(Counter(color.rgba() for color in samples).most_common(1)[0][0])
+        name = f"{label.objectName() or 'label'}[{index}] {label.text()[:60]}"
+        if background.alpha() != 255:
+            failures.append(f"{name}: backing surface is transparent")
+            continue
+        foreground = label.palette().color(label.foregroundRole())
+        ratio = contrast_ratio(foreground.name(), background.name())
+        ratios[name] = ratio
+        if ratio < minimum:
+            failures.append(f"{name}: {ratio:.2f}:1 on {background.name()}")
+    if failures:
+        raise AssertionError("Rendered label contrast failed: " + "; ".join(failures))
+    return ratios
+
+
 if __name__ == "__main__":
     for pair, ratio in assert_theme_contrast().items():
         print(f"{pair}: {ratio:.2f}:1")
