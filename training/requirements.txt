@@ -1,0 +1,9 @@
+# Install only into a separate Python 3.11/3.12 environment, never the app venv.
+# Install torch separately using the official selector for the intended CPU/CUDA device.
+numpy>=1.26,<3
+Pillow>=10.4,<13
+opencv-python-headless>=4.10,<6
+psutil>=6,<8
+platformdirs>=4,<5
+onnx>=1.17,<2
+onnxruntime>=1.20,<2

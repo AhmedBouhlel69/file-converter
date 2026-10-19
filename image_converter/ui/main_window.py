@@ -143,6 +143,11 @@ class ImageConverterMainWindow(QMainWindow):
         self.image_tools_page.compress_requested.connect(self._open_image_compress_dialog)
         self.background_removal_page = BackgroundRemovalPage()
         self.background_removal_page.queue_requested.connect(self._use_queue_for_background_removal)
+        self.background_removal_page.start_guard = lambda: (
+            "Finish the current conversion before removing backgrounds."
+            if self._is_converting else None
+        )
+        self.background_removal_page.busy_changed.connect(self._background_busy_changed)
         self.app_stack.addWidget(self.convert_page)
         self.app_stack.addWidget(self.image_tools_page)
         self.app_stack.addWidget(self.pdf_tools_page)
@@ -537,7 +542,10 @@ class ImageConverterMainWindow(QMainWindow):
         self.queue_state_stack.setCurrentIndex(1 if total else 0)
         self.btn_remove_item.setEnabled(selected and not self._is_converting)
         self.btn_clear_all.setEnabled(bool(total) and not self._is_converting)
-        self.btn_convert_all.setEnabled(bool(total))
+        background_busy = (
+            hasattr(self, "background_removal_page") and self.background_removal_page.is_running
+        )
+        self.btn_convert_all.setEnabled(bool(total) and not background_busy)
         if self._is_converting:
             self.btn_convert_all.setText("Cancel conversion")
             set_variant(self.btn_add_files, "secondary")
@@ -554,7 +562,10 @@ class ImageConverterMainWindow(QMainWindow):
         input_total = model.input_total()
         estimated_total = model.estimated_total()
         estimate = f"~{format_bytes(estimated_total)}" if estimated_total is not None else "—"
-        if update_status and self._footer_state == "ready" and not self._is_converting:
+        if background_busy and not self._is_converting:
+            self.lbl_status.setText("Background removal is running")
+            self.lbl_status_hint.setText("One processing job runs at a time to reduce resource use.")
+        elif update_status and self._footer_state == "ready" and not self._is_converting:
             self.lbl_status.setText(
                 f"{total} file{'s' if total != 1 else ''} · {format_bytes(input_total)} → {estimate}"
             )
@@ -572,6 +583,11 @@ class ImageConverterMainWindow(QMainWindow):
             selected_default = self.settings_widget.get_target_format()
             if selected_default and model.default_format != selected_default:
                 model.set_default_format(selected_default)
+
+    def _background_busy_changed(self, busy: bool):
+        if not busy and not self._is_converting:
+            self._footer_state = "ready"
+        self._refresh_queue_ui()
 
     def _set_queue_editing_enabled(self, enabled: bool):
         self.btn_add_files.setEnabled(enabled)
@@ -696,6 +712,9 @@ class ImageConverterMainWindow(QMainWindow):
             self.background_removal_page.start()
             return
         if self._is_converting:
+            return
+        if self.background_removal_page.is_running:
+            self._refresh_queue_ui()
             return
         model = self.queue_table.queue_model
         if not model.entries:

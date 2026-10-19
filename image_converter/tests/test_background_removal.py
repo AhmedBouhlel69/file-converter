@@ -19,7 +19,7 @@ def photo(tmp_path):
 
 @pytest.fixture
 def backend(monkeypatch):
-    state = SimpleNamespace(initializations=0, warmups=0, calls=[], options=[], fail_init=None,
+    state = SimpleNamespace(initializations=0, warmups=0, releases=0, calls=[], options=[], fail_init=None,
                             fail_remove=None, on_remove=None, on_save_mask=None)
 
     class Removed:
@@ -54,8 +54,12 @@ def backend(monkeypatch):
                 raise state.fail_remove
             return Removed()
 
+    def release_cache():
+        state.releases += 1
+
     fake = SimpleNamespace(Remover=Remover, RefineOptions=lambda **kwargs: kwargs,
-                           ComposeOptions=lambda **kwargs: kwargs)
+                           ComposeOptions=lambda **kwargs: kwargs,
+                           release_engine_cache=release_cache)
     real_import = bg.importlib.import_module
     monkeypatch.setattr(bg.importlib, "import_module", lambda name, *a, **k:
                         fake if name == "bgremove" else real_import(name, *a, **k))
@@ -146,6 +150,8 @@ def test_process_reuses_cpu_session_and_writes_alpha_and_mask(photo, tmp_path, b
     assert all(result.success for result in results)
     assert backend.initializations == backend.warmups == 1
     assert backend.init_options["device"] == "cpu"
+    assert backend.init_options["threads"] == 2
+    assert backend.releases == 1
     assert [(n, total) for n, total, _ in progress] == [(1, 2), (2, 2)]
     assert backend.options[0]["refinement"] == {"feather_sigma": 1.2, "edge_shift": -1}
     assert backend.options[0]["composition"]["crop"] is True
@@ -159,6 +165,43 @@ def test_process_reuses_cpu_session_and_writes_alpha_and_mask(photo, tmp_path, b
     assert results[0].input_dimensions == (12, 8)
     assert results[0].output_size_bytes > 0
     assert photo.exists()
+
+
+def test_single_job_releases_model_and_close_is_idempotent(photo, backend):
+    service = bg.BackgroundRemovalService()
+    assert service.process(bg.plan_tasks([photo])[0]).success
+    assert backend.releases == 1
+    assert service._backend is service._remover is None
+    service.close()
+    assert backend.releases == 1
+
+
+def test_callback_error_releases_model_before_propagating(photo, backend):
+    service = bg.BackgroundRemovalService()
+
+    def fail_callback(*_args):
+        raise RuntimeError("Cannot display progress")
+
+    with pytest.raises(RuntimeError, match="display progress"):
+        service.run_batch(bg.plan_tasks([photo]), progress_callback=fail_callback)
+    assert backend.releases == 1
+    assert service._backend is service._remover is None
+
+
+def test_cancelled_batch_releases_initialized_model(photo, tmp_path, backend):
+    second = tmp_path / "second.png"
+    Image.new("RGB", (12, 8), "blue").save(second)
+    cancelled = False
+
+    def cancel_after_result(*_args):
+        nonlocal cancelled
+        cancelled = True
+
+    service = bg.BackgroundRemovalService()
+    results = service.run_batch(bg.plan_tasks([photo, second]), cancel_after_result,
+                                lambda: cancelled)
+    assert len(results) == 1 and results[0].success
+    assert backend.initializations == 1 and backend.releases == 1
 
 
 def test_lossless_webp_export(photo, backend):

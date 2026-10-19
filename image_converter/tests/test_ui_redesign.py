@@ -32,6 +32,53 @@ def test_theme_contrast_meets_wcag_thresholds():
     assert ratios["focus ring on first surface"] >= 3.0
 
 
+def test_background_job_waits_for_active_conversion(qapp, tmp_path, monkeypatch):
+    from image_converter.ui import background_removal_page as background_page
+
+    source = tmp_path / "image.png"
+    Image.new("RGB", (12, 8), "red").save(source)
+    window = ImageConverterMainWindow()
+    window.background_removal_page.add_files([source])
+    window._is_converting = True
+
+    def unexpected_worker(*_args, **_kwargs):
+        pytest.fail("A second processing job must not launch")
+
+    monkeypatch.setattr(background_page, "BackgroundRemovalWorker", unexpected_worker)
+    window.background_removal_page.start()
+    assert not window.background_removal_page.is_running
+    assert "current conversion" in window.background_removal_page.lbl_status.text()
+    window._is_converting = False
+    window.close()
+
+
+def test_conversion_waits_for_background_job_and_recovers(qapp, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from image_converter.ui import main_window
+
+    source = tmp_path / "image.png"
+    Image.new("RGB", (12, 8), "red").save(source)
+    window = ImageConverterMainWindow()
+    window.add_images([source])
+    page = window.background_removal_page
+    page.worker = SimpleNamespace()
+    page._set_busy(True)
+
+    def unexpected_worker(*_args, **_kwargs):
+        pytest.fail("A second processing job must not launch")
+
+    monkeypatch.setattr(main_window, "BatchConversionWorker", unexpected_worker)
+    window.start_conversion()
+    assert not window._is_converting
+    assert not window.btn_convert_all.isEnabled()
+    assert "Background removal is running" in window.lbl_status.text()
+    page.worker = None
+    page._set_busy(False)
+    assert window.btn_convert_all.isEnabled()
+    assert "Background removal is running" not in window.lbl_status.text()
+    window.close()
+
+
 def test_queue_model_is_five_columns_and_handles_mixed_defaults(qapp, tmp_path: Path):
     image_path = tmp_path / "sample.png"
     Image.new("RGB", (32, 24), "#6654E8").save(image_path)

@@ -10,6 +10,7 @@ from .compose import ComposeOptions
 from .loader import InputError
 from .refine import RefineOptions
 from .remover import Remover
+from .resource_policy import DEFAULT_CPU_THREADS
 
 _EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 
@@ -210,7 +211,7 @@ def run_batch(
         or requested_threads < 0
     ):
         raise ValueError("Threads must be a nonnegative integer")
-    threads = requested_threads or max(1, cores // jobs)
+    threads = requested_threads or min(DEFAULT_CPU_THREADS, max(1, cores // jobs))
     if threads * jobs > cores:
         raise ValueError("Jobs times threads must not exceed physical CPU cores")
     config["threads"] = threads

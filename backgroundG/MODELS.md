@@ -10,10 +10,16 @@ inference can require substantially more RAM than the file size.
 
 | Profile | Artifact | Download | Upstream license | Validation in this workspace |
 | --- | --- | ---: | --- | --- |
-| `fast` | U²-NetP, 320 × 320 | 4.57 MB | Apache-2.0 | Downloaded; SHA-256 and publisher MD5 verified |
-| `balanced` | IS-Net general use, 1024 × 1024 | 178.65 MB | Apache-2.0 | Publisher hash metadata checked; not locally run |
-| `quality` | BiRefNet general, 1024 × 1024 | 972.67 MB | MIT | Publisher hash metadata checked; not locally run |
-| `portrait` | BiRefNet portrait, 1024 × 1024 | 972.67 MB | MIT | Publisher hash metadata checked; not locally run |
+| `fast` | U²-NetP, 320 × 320 | 4.57 MB | Apache-2.0 | Installed; size/SHA-256 verified; real-image processing passed |
+| `balanced` | IS-Net general use, 1024 × 1024 | 178.65 MB | Apache-2.0 | Installed; size/SHA-256 verified; real-image CPU processing passed |
+| `quality` | BiRefNet general, 1024 × 1024 | 972.67 MB | MIT | Installed; size/SHA-256 verified; successful inference still RAM-blocked |
+| `portrait` | BiRefNet portrait, 1024 × 1024 | 972.67 MB | MIT | Installed; size/SHA-256 verified; successful inference still RAM-blocked |
+
+Status updated 19 October 2026. Run `bgremove models check --json` for fresh CPU
+startup readiness without allocating a model session. Quality/Portrait need
+8 GiB free RAM under the app's startup policy; passing that check is not an
+inference guarantee. See [guarded verification](../docs/BACKGROUND_MODELS.md)
+for measurements, prior memory trials and the repeatable real-image test command.
 
 Profile names describe intended roles. They are not measured accuracy or speed
 rankings on this machine. These are segmentation masks, not a guarantee of correct

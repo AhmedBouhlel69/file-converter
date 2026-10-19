@@ -184,6 +184,40 @@ def models_verify(
                 )
 
 
+@models_app.command("check")
+def models_check(
+    profile: Annotated[str | None, typer.Argument()] = None,
+    registry: Path | None = None,
+    model_dir: Path | None = None,
+    allow_noncommercial: bool = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print a JSON readiness report.")] = False,
+) -> None:
+    """Verify local models and CPU startup readiness without running inference.
+
+    Exit codes: 0 all ready; 2 invalid arguments; 3 unusable artifact/provider;
+    5 insufficient free RAM. Invalid registry files also use code 3.
+    """
+    with errors():
+        from .readiness import check_models, readiness_exit_code
+
+        report = check_models(profile, registry, model_dir, allow_noncommercial)
+        if json_output:
+            typer.echo(json.dumps(report, indent=2, allow_nan=False))
+        else:
+            typer.echo(
+                "CPU startup readiness: "
+                f"{report['available_memory_bytes'] / 1024**3:.1f} GiB free RAM. "
+                "No inference performed."
+            )
+            typer.echo("Large models require 8 GiB free RAM; readiness does not guarantee inference.")
+            for entry in report["profiles"]:
+                typer.echo(f"{entry['profile']}: {entry['status']} - {entry['path']}")
+                typer.echo(f"  {entry['reason']}")
+        code = readiness_exit_code(report)
+        if code:
+            raise typer.Exit(code)
+
+
 @models_app.command("pull")
 def models_pull(
     profile: str,

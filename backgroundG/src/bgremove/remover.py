@@ -70,6 +70,7 @@ class Remover:
         self.device, self.strict, self.threads = device, strict_device, threads
 
     def warmup(self) -> Engine:
+        """Create or reuse a validated session without running dummy inference."""
         return get_engine(self.path, self.config, self.device, self.strict, self.threads)
 
     def _predict(

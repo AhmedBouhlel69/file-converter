@@ -1,0 +1,8 @@
+.venv/
+data/
+runs/
+upstream/
+checkpoints/
+*.onnx
+*.pth
+*.pt

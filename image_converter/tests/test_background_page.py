@@ -109,6 +109,16 @@ def test_invalid_options_are_reported_before_worker_starts(qapp, tmp_path):
     assert page.lbl_status.property("state") == "error"
 
 
+def test_large_model_hint_explains_memory_requirement(qapp):
+    page = BackgroundRemovalPage()
+    for model in ("quality", "portrait"):
+        page.combo_model.setCurrentIndex(page.combo_model.findData(model))
+        assert "8 GiB" in page.model_hint.text()
+        assert "Fast or Balanced" in page.model_hint.text()
+    page.combo_model.setCurrentIndex(page.combo_model.findData("balanced"))
+    assert "8 GiB" not in page.model_hint.text()
+
+
 def test_queue_action_and_drop_stay_on_dedicated_page(qapp, tmp_path):
     source = make_image(tmp_path / "photo.png")
     other = make_image(tmp_path / "other.jpg")

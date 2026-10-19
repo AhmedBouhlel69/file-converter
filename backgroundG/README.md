@@ -35,15 +35,42 @@ weights, contacts servers or sends images anywhere. `BGREMOVE_OFFLINE=1` blocks
 model downloads. Model files are checked against a registered SHA-256 before use.
 
 Available profiles: `fast` (4.57 MB U2netp), `balanced` (178.65 MB IS-Net; default),
-`quality` and `portrait` (972.67 MB BiRefNet each). Larger weights are registered
-but have not been downloaded or tested here. See [MODELS.md](MODELS.md) for the
-exact exports, licences, hashes, normalization and validation limits. To use the
-default, install it explicitly with `bgremove models pull balanced` first.
+`quality` and `portrait` (972.67 MB BiRefNet each). All four are installed and
+hash-verified in this workspace. Fast and Balanced passed real-image processing;
+Quality/Portrait still need successful inference under sufficient free RAM.
+See [MODELS.md](MODELS.md) for the exact exports, licences, hashes, normalization
+and validation limits. On another installation, explicitly install the selected
+profile with `bgremove models pull PROFILE` first.
 
 The cache is chosen by platformdirs; override with `BGREMOVE_MODEL_DIR` or
 `--model-dir`. Use `--registry path.json` for a custom registry. Its input sizes
 are `[width, height]`. Custom non-commercial or unverified profiles require
 `--allow-noncommercial`; a missing checksum always blocks usage.
+
+### CPU startup readiness
+
+```powershell
+bgremove models check
+bgremove models check portrait --json
+```
+
+These commands verify local sizes/SHA-256, licence policy, CPU provider and free
+RAM without creating ONNX sessions or running inference. Exit 0 means startup
+checks passed, 3 means an unusable artifact/provider, and 5 means insufficient
+RAM; invalid profile/arguments use 2. Readiness is not proof of successful
+inference. CPU models of at least 500 MB currently require 8 GiB free RAM at
+startup. See [the app's guarded model verification guide](../docs/BACKGROUND_MODELS.md)
+for the installed profiles and optional isolated real-image tests.
+
+Runtime defaults now use two CPU threads, sequential graph execution, no idle
+worker spinning, and no CPU activation-arena or memory-pattern retention. Graph
+optimization and tensor reuse remain enabled. Only the registered output is
+returned. `warmup()` initializes and validates the session without running dummy
+images; the first real image performs the first inference. Explicit thread
+overrides remain available. Python callers can use `bgremove.release_engine_cache()`
+after a batch to drop idle session ownership; active callers remain valid.
+The desktop adapter performs that cleanup automatically. See
+[measured results](../docs/RUNTIME_OPTIMIZATION.md).
 
 ## Batch processing and refinement
 

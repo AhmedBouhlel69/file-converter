@@ -127,10 +127,18 @@ python launch_converter.py -i ./photos -f WEBP -q 75 --width 1920 --height 1920 
 
 ## Background Removal
 
-Open **Background Removal** in the left navigation for its own workspace. Add images,
+Open **Remove Background** in the top navigation for its own workspace. Add images,
 choose a local model and output folder, adjust optional edge/crop settings, and start
 the batch. The worker reuses one CPU model session, reports each file, and supports
 cancellation between images. Select a result to compare the source and cutout.
+
+Select a completed image and click **Copy image** above the result, right-click the
+result and choose **Copy image**, or press **Ctrl+C** while the image queue or result
+preview has focus. Paste with **Ctrl+V** in an image editor, document, chat, or folder
+that accepts images or files. Copying uses the full-resolution exported image,
+including its transparency, rather than the smaller preview. The clipboard offers
+PNG image data, a native image, and the exported file for compatible paste targets.
+The receiving app determines which format it accepts and whether it retains alpha.
 
 Install the optional feature from the repository root using **Python 3.11+**:
 
@@ -140,6 +148,11 @@ Install the optional feature from the repository root using **Python 3.11+**:
 # Only needed if the fast model is not already in backgroundG/models or the cache.
 # This explicit command downloads and verifies its pinned model artifact.
 .\venv\Scripts\bgremove.exe models pull fast --model-dir backgroundG/models
+
+# Install additional profiles in the shared per-user model cache.
+.\venv\Scripts\bgremove.exe models pull balanced
+.\venv\Scripts\bgremove.exe models pull portrait
+.\venv\Scripts\bgremove.exe models pull quality
 ```
 
 Normal conversion and compression remain available without this optional package.
@@ -152,6 +165,32 @@ Without an explicit folder, the app checks bundled models, `backgroundG/models`,
 then the module's platform cache. Every model is verified against its registered
 SHA-256 before use. See [backgroundG/MODELS.md](backgroundG/MODELS.md) for provenance,
 model sizes, and license details.
+
+Quality and Portrait require **at least 8 GiB of free RAM** for this app's CPU
+processing. The app checks memory before allocating a large model session and
+returns a clear error when there is insufficient headroom. Fast and Balanced use
+less memory. This is a startup check, not a hard memory limit during processing;
+image size and other running programs still affect resource use.
+
+Resource defaults favor a responsive desktop: two ONNX CPU threads, no idle
+thread spinning, only the requested mask output, and session release after each
+batch. Normal file conversion defaults to two concurrent workers; the GUI does
+not start Convert and Remove Background batches together. The model weights and
+full-resolution outputs are unchanged. See the [measured runtime improvements](docs/RUNTIME_OPTIMIZATION.md).
+
+A separate [training workflow](docs/TRAINING_AND_OPTIMIZATION.md) prepares a
+small U2NETP candidate from reviewed image/mask pairs. It keeps development
+dependencies outside the app and does not replace installed weights automatically.
+
+Check installed files and CPU startup readiness without loading model sessions:
+
+```powershell
+.\venv\Scripts\bgremove.exe models check --json
+```
+
+See [model readiness and guarded verification](docs/BACKGROUND_MODELS.md) for
+the current four-profile status, exit codes and safe real-image test commands.
+The [full GUI report](docs/GUI_REPORT.html) covers every page, control and dialog.
 
 ```powershell
 # Transparent PNG next to the original, using a unique photo_nobg.png name.

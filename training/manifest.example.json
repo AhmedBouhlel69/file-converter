@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "name": "REPLACE: reviewed portrait and product collection",
+    "rights": "REPLACE: source, licence and permission to train/distribute weights",
+    "ground_truth": "human-reviewed",
+    "annotation_process": "REPLACE: who reviewed the alpha edges, hair and transparent areas"
+  },
+  "samples": [
+    {"id": "sample-001", "group": "subject-or-session-001", "image": "images/001.jpg", "mask": "masks/001.png"},
+    {"id": "sample-002", "group": "subject-or-session-002", "image": "images/002.jpg", "mask": "masks/002.png"},
+    {"id": "sample-003", "group": "subject-or-session-003", "image": "images/003.jpg", "mask": "masks/003.png"}
+  ]
+}

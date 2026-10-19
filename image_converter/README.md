@@ -111,6 +111,11 @@ Run these commands from the repository root using Python 3.11 or newer:
 
 # Explicit download only when a verified fast model is not already local.
 .\venv\Scripts\bgremove.exe models pull fast --model-dir backgroundG/models
+
+# Optional additional profiles, stored in the per-user model cache.
+.\venv\Scripts\bgremove.exe models pull balanced
+.\venv\Scripts\bgremove.exe models pull portrait
+.\venv\Scripts\bgremove.exe models pull quality
 ```
 
 The app uses local ONNX models, verifies their SHA-256, and never downloads weights
@@ -120,6 +125,24 @@ folder using `--bg-model-dir`, the page's model-folder setting, or
 `BGREMOVE_MODEL_DIR`. The default search covers packaged models, `backgroundG/models`,
 and the module's platform cache. See [the model guide](../backgroundG/MODELS.md) for
 explicit install commands, provenance, model sizes, and licenses.
+
+Quality and Portrait need at least **8 GiB of free RAM** for CPU processing. A
+preflight check rejects insufficient memory before allocating the model session;
+choose Fast/Balanced or free memory in other apps. The check does not enforce a
+continuous memory cap. Only the currently selected model session is retained in
+the idle cache when switching profiles.
+
+Background inference now defaults to two CPU threads with idle spinning off,
+fetches only its mask output, and releases its model after every batch. Two dummy
+startup inferences were removed. Normal file conversion defaults to two workers;
+Convert and Remove Background batches cannot overlap in the GUI. See
+[runtime measurements](../docs/RUNTIME_OPTIMIZATION.md) and the separate
+[training workflow](../docs/TRAINING_AND_OPTIMIZATION.md).
+
+Use `.\venv\Scripts\bgremove.exe models check --json` from the repository root to
+verify files and CPU startup readiness without constructing model sessions.
+See [model readiness and guarded verification](../docs/BACKGROUND_MODELS.md) for
+current results and an explicit, guarded real-image verification command.
 
 JPEG, PNG, WebP, BMP, and TIFF inputs are supported up to 25 MiB and 120 MP per
 image. Animated and multi-page images are rejected. PNG is the default; WebP is
@@ -133,6 +156,13 @@ Advanced options are `--bg-feather`, `--bg-edge-shift`, `--bg-two-pass`, `--bg-c
 and `--bg-padding`. Use `--bg-fill-color '#ffffff'` for a solid fill; omitting it
 preserves transparency. Conversion's `--bg-color`, resize, OCR, and metadata
 inspection/cleaning belong to the other CLI modes. Alpha matting is not included.
+
+On the **Remove Background** page, select a completed image and click **Copy image**
+above its result, use the result's context menu, or press **Ctrl+C** with the queue or
+result preview focused. **Ctrl+V** pastes into compatible apps or folders. Clipboard
+data includes full-resolution PNG pixels with transparency, a native image, and the
+exported file URL. It never copies the scaled preview or checkerboard. Clipboard
+formats and transparency support depend on the receiving app.
 
 The fast-model sample runs and integration smoke checks validate file processing,
 not measured segmentation quality. Hair, glass, tiny subjects, and low contrast

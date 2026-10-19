@@ -6,9 +6,12 @@ from pathlib import Path
 from threading import Event
 
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QImage, QImageReader, QPainter
+from PySide6.QtGui import (
+    QAction, QColor, QDesktopServices, QImage, QImageReader, QKeySequence,
+    QPainter, QShortcut,
+)
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QApplication, QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
     QSpinBox, QSplitter, QVBoxLayout, QWidget,
@@ -18,6 +21,9 @@ from image_converter.core.background_removal import (
     BackgroundRemovalConfig, IMAGE_EXTENSIONS, MODEL_PROFILES, plan_tasks,
 )
 from image_converter.ui.background_worker import BackgroundRemovalWorker
+from image_converter.ui.image_clipboard import (
+    clipboard_mime_data, file_signature, load_clipboard_image,
+)
 from image_converter.ui.theme import repolish, set_eyebrow, set_variant
 
 
@@ -33,6 +39,7 @@ class _PreviewTask(QRunnable):
 
     def run(self):
         image = QImage()
+        reader = None
         try:
             if not self.cancelled.is_set() and self.path.is_file():
                 reader = QImageReader(str(self.path))
@@ -44,7 +51,29 @@ class _PreviewTask(QRunnable):
         except OSError:
             pass
         finally:
+            # Release the file handle before notifying the UI. Windows can
+            # otherwise reject moving/deleting an already displayed preview.
+            reader = None
             self.signals.ready.emit(self.generation, image)
+
+
+class _CopySignals(QObject):
+    ready = Signal(int, object, str)
+
+
+class _CopyTask(QRunnable):
+    def __init__(self, generation, path):
+        super().__init__()
+        self.generation, self.path = generation, path
+        self.signals = _CopySignals()
+
+    def run(self):
+        result, error = None, ""
+        try:
+            result = load_clipboard_image(self.path)
+        except Exception as exc:
+            error = str(exc) or "Could not read the saved cutout"
+        self.signals.ready.emit(self.generation, result, error)
 
 
 class CutoutPreview(QFrame):
@@ -107,6 +136,7 @@ class CutoutPreview(QFrame):
 
 class BackgroundRemovalPage(QFrame):
     queue_requested = Signal()
+    busy_changed = Signal(bool)
 
     IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff)"
 
@@ -121,6 +151,11 @@ class BackgroundRemovalPage(QFrame):
         self._results = []
         self._cancelled = False
         self._last_output: Path | None = None
+        self._copy_generation = 0
+        self._copy_tasks = {}
+        self._copy_busy = False
+        self._copy_errors: set[Path] = set()
+        self.start_guard = None
         self._build_ui()
 
     @property
@@ -205,9 +240,33 @@ class BackgroundRemovalPage(QFrame):
             set_eyebrow(caption)
             preview = CutoutPreview(placeholder)
             setattr(self, attribute, preview)
-            card_layout.addWidget(caption)
+            caption_row = QHBoxLayout()
+            caption_row.addWidget(caption)
+            caption_row.addStretch()
+            if attribute == "after_preview":
+                self.btn_copy = QPushButton("Copy image")
+                self.btn_copy.setEnabled(False)
+                self.btn_copy.setToolTip("Copy the full-size cutout, including transparency (Ctrl+C)")
+                set_variant(self.btn_copy, "secondary")
+                self.btn_copy.clicked.connect(self.copy_result)
+                caption_row.addWidget(self.btn_copy)
+            card_layout.addLayout(caption_row)
             card_layout.addWidget(preview, stretch=1)
             previews.addWidget(card)
+        self.after_preview.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.after_preview.setToolTip("Copy image with Ctrl+C or right-click")
+        self.after_preview.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        self.copy_action = QAction("Copy image", self.after_preview)
+        self.copy_action.setEnabled(False)
+        self.copy_action.triggered.connect(self.copy_result)
+        self.after_preview.addAction(self.copy_action)
+        self._copy_shortcuts = []
+        for widget in (self.after_preview, self.file_list):
+            shortcut = QShortcut(QKeySequence.StandardKey.Copy, widget)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.setEnabled(False)
+            shortcut.activated.connect(self.copy_result)
+            self._copy_shortcuts.append(shortcut)
         right.addLayout(previews, stretch=3)
 
         self.settings = QFrame()
@@ -224,10 +283,12 @@ class BackgroundRemovalPage(QFrame):
         grid.addWidget(self.combo_model, 0, 1)
         grid.addWidget(QLabel("Output"), 0, 2)
         grid.addWidget(self.combo_format, 0, 3)
-        model_hint = QLabel("Fast is the default. Each profile requires its model files installed locally.")
-        model_hint.setObjectName("MutedLabel")
-        model_hint.setWordWrap(True)
-        grid.addWidget(model_hint, 1, 0, 1, 4)
+        self.model_hint = QLabel()
+        self.model_hint.setObjectName("MutedLabel")
+        self.model_hint.setWordWrap(True)
+        self.combo_model.currentIndexChanged.connect(self._update_model_hint)
+        self._update_model_hint()
+        grid.addWidget(self.model_hint, 1, 0, 1, 4)
         self.txt_output = QLineEdit()
         self.txt_output.setPlaceholderText("Same folder as each source image")
         self.txt_output.setAccessibleName("Background removal output folder")
@@ -328,6 +389,18 @@ class BackgroundRemovalPage(QFrame):
         self.advanced.setVisible(checked)
         self.btn_advanced.setText("Hide advanced settings" if checked else "Show advanced settings")
 
+    def _update_model_hint(self, *_args):
+        if self.combo_model.currentData() in ("quality", "portrait"):
+            self.model_hint.setText(
+                "Quality and Portrait require at least 8 GiB of free RAM. "
+                "Choose Fast or Balanced when memory is limited."
+            )
+        else:
+            self.model_hint.setText(
+                "Efficient local processing: 2 CPU threads. "
+                "The model is released after each batch. Fast uses the least RAM."
+            )
+
     def browse_images(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Choose images for background removal", "", self.IMAGE_FILTER)
         self.add_files([Path(path) for path in files])
@@ -395,9 +468,73 @@ class BackgroundRemovalPage(QFrame):
         self._show_selection(-1)
 
     def _show_selection(self, row):
+        self._copy_generation += 1
+        self._copy_busy = False
         source = self.files[row] if 0 <= row < len(self.files) else None
         self.before_preview.set_path(source)
         self.after_preview.set_path(self.outputs.get(source))
+        self._refresh_copy()
+
+    def _selected_output(self):
+        row = self.file_list.currentRow()
+        source = self.files[row] if 0 <= row < len(self.files) else None
+        path = self.outputs.get(source)
+        try:
+            return path if path and path.is_file() else None
+        except OSError:
+            return None
+
+    def _refresh_copy(self):
+        path = self._selected_output()
+        enabled = bool(path and path not in self._copy_errors and not self._copy_busy)
+        self.btn_copy.setEnabled(enabled)
+        self.btn_copy.setText("Copying…" if self._copy_busy else "Copy image")
+        self.copy_action.setEnabled(enabled)
+        for shortcut in self._copy_shortcuts:
+            shortcut.setEnabled(enabled)
+
+    def copy_result(self):
+        """Copy only the selected source's current successful saved output."""
+        path = self._selected_output()
+        if path is None or path in self._copy_errors or self._copy_busy:
+            self._refresh_copy()
+            return
+        self._copy_generation += 1
+        generation = self._copy_generation
+        self._copy_busy = True
+        self._refresh_copy()
+        self._set_status("Preparing the full-size image for copying…")
+        task = _CopyTask(generation, path)
+        self._copy_tasks[generation] = task
+        task.signals.ready.connect(self._copy_ready)
+        QThreadPool.globalInstance().start(task)
+
+    def _copy_ready(self, generation, result, error):
+        task = self._copy_tasks.pop(generation, None)
+        if generation != self._copy_generation:
+            return
+        self._copy_busy = False
+        path = self._selected_output()
+        if task is None:
+            self._refresh_copy()
+            return
+        if path != task.path:
+            self._set_status("Could not copy image. The saved cutout is no longer available.", "error")
+            self._refresh_copy()
+            return
+        if not error:
+            try:
+                if result is None or file_signature(path) != result.signature:
+                    error = "The saved cutout changed while preparing to copy; try again"
+            except OSError:
+                error = "The saved cutout is no longer available"
+        if error:
+            self._copy_errors.add(path)
+            self._set_status(f"Could not copy image. {error}", "error")
+        else:
+            QApplication.clipboard().setMimeData(clipboard_mime_data(result))
+            self._set_status("Copied image. Paste with Ctrl+V.", "success")
+        self._refresh_copy()
 
     def _set_status(self, message, state=""):
         self.lbl_status.setText(message)
@@ -419,6 +556,11 @@ class BackgroundRemovalPage(QFrame):
     def start(self):
         if self.is_running or not self.files:
             return
+        if self.start_guard is not None:
+            blocked = self.start_guard()
+            if blocked:
+                self._set_status(blocked, "warning")
+                return
         try:
             config = self._config()
             self.tasks = plan_tasks(self.files, self.txt_output.text().strip() or None,
@@ -429,6 +571,7 @@ class BackgroundRemovalPage(QFrame):
         self._results = []
         self._cancelled = False
         self.outputs.clear()
+        self._copy_errors.clear()
         self._show_selection(self.file_list.currentRow())
         for index, path in enumerate(self.files):
             self.file_list.item(index).setText(f"{path.name}\nQueued")
@@ -449,6 +592,7 @@ class BackgroundRemovalPage(QFrame):
         self.btn_start.setEnabled(not busy and bool(self.files))
         self.btn_cancel.setVisible(busy)
         self.btn_cancel.setEnabled(busy)
+        self.busy_changed.emit(busy)
 
     def _file_completed(self, index, result):
         if not 0 <= index < len(self.files):
@@ -457,6 +601,7 @@ class BackgroundRemovalPage(QFrame):
         item = self.file_list.item(index)
         if result.success:
             destination = Path(result.output_path)
+            self._copy_errors.discard(destination)
             self.outputs[source] = destination
             self._last_output = destination.parent
             self.btn_open.setEnabled(True)

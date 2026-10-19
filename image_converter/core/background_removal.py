@@ -7,6 +7,7 @@ session. Use one service per worker to reuse its CPU inference session.
 from __future__ import annotations
 
 import importlib
+import logging
 import math
 import os
 import sys
@@ -34,6 +35,7 @@ MAX_BYTES = 25 * 1024 * 1024
 MAX_PIXELS = 120_000_000
 _SOURCE_FORMATS = {"JPEG", "PNG", "WEBP", "BMP", "TIFF"}
 ProgressCallback = Callable[[int, int, ConversionResult], None]
+logger = logging.getLogger(__name__)
 
 
 def _output_format(value: str) -> str:
@@ -243,6 +245,7 @@ class BackgroundRemovalService:
                 model=self.config.model,
                 device="cpu",
                 model_dir=resolve_model_directory(self.config.model_dir, self.config.model),
+                threads=2,
             )
             # Initialize once here so failed sessions are not retried for each file.
             remover.warmup()
@@ -250,6 +253,17 @@ class BackgroundRemovalService:
         except Exception as exc:
             self._initialization_error = f"Cannot initialize background removal ({self.config.model}): {exc}"
             raise RuntimeError(self._initialization_error) from exc
+
+    def close(self) -> None:
+        """Release idle model ownership after a job; active external users remain valid."""
+        backend, self._backend = self._backend, None
+        self._remover = None
+        release = getattr(backend, "release_engine_cache", None)
+        if release is not None:
+            try:
+                release()
+            except Exception:
+                logger.warning("Could not release the idle background model", exc_info=True)
 
     def _check_targets(self, task: BackgroundRemovalTask, protected: set[str]) -> None:
         if task.output_path.suffix.lower() != f".{self.config.output_format.lower()}":
@@ -268,7 +282,10 @@ class BackgroundRemovalService:
                 raise FileExistsError(f"Output already exists: {path}")
 
     def process(self, task: BackgroundRemovalTask) -> ConversionResult:
-        return self._process(task, {_key(task.input_path)}, None)
+        try:
+            return self._process(task, {_key(task.input_path)}, None)
+        finally:
+            self.close()
 
     def _process(self, task: BackgroundRemovalTask, protected: set[str], cancel_check) -> ConversionResult:
         started = time.perf_counter()
@@ -340,11 +357,14 @@ class BackgroundRemovalService:
         items = list(tasks)
         protected = {_key(task.input_path) for task in items}
         results = []
-        for task in items:
-            if cancel_check is not None and cancel_check():
-                break
-            result = self._process(task, protected, cancel_check)
-            results.append(result)
-            if progress_callback is not None:
-                progress_callback(len(results), len(items), result)
-        return results
+        try:
+            for task in items:
+                if cancel_check is not None and cancel_check():
+                    break
+                result = self._process(task, protected, cancel_check)
+                results.append(result)
+                if progress_callback is not None:
+                    progress_callback(len(results), len(items), result)
+            return results
+        finally:
+            self.close()

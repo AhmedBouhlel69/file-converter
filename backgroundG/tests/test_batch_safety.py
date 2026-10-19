@@ -251,6 +251,24 @@ def test_worker_thread_budget_is_enforced(
         run_batch([], {"threads": threads}, BatchOptions(), jobs=jobs)
 
 
+@pytest.mark.parametrize("requested, expected", [(0, 2), (4, 4)])
+def test_sequential_batch_uses_small_default_but_respects_explicit_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requested: int, expected: int
+) -> None:
+    source = _touch(tmp_path / "photo.png")
+    items = plan_batch([source], tmp_path / "out")
+    monkeypatch.setattr(batch, "physical_cores", lambda: 12)
+    observed = []
+
+    def create(**config: Any) -> FakeRemover:
+        observed.append(config)
+        return FakeRemover()
+
+    monkeypatch.setattr(batch, "Remover", create)
+    run_batch(items, {"device": "cpu", "threads": requested}, BatchOptions())
+    assert observed[0]["threads"] == expected
+
+
 def test_fully_resumed_batch_does_not_initialize_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

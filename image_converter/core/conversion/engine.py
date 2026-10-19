@@ -1123,7 +1123,9 @@ class ImageConverterEngine:
                     workers = cfg.max_workers
                     break
         if workers is None:
-            workers = min(8, max(1, os.cpu_count() or 4))
+            # Keep the desktop responsive and limit concurrent decoded images.
+            # Explicit --workers/config requests still override this default.
+            workers = min(2, max(1, os.cpu_count() or 1))
 
         results: List[ConversionResult] = [None] * total  # type: ignore
         completed_count = 0
