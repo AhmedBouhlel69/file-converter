@@ -50,10 +50,11 @@ class ImageToolsPage(QFrame):
 
         label = QLabel("COMPRESS")
         set_eyebrow(label)
-        heading = QLabel("Reduce image file size")
+        heading = QLabel("Try smaller image copies")
         heading.setObjectName("SectionTitleLarge")
         body = QLabel(
-            "Create smaller image copies with WebP, JPEG, PNG optimization, optional resizing, and metadata removal."
+            "Choose WebP, JPEG or PNG output with quality, resize and supported metadata controls. "
+            "Savings and applied settings vary by image and conversion route."
         )
         body.setObjectName("MutedLabel")
         body.setWordWrap(True)
@@ -62,7 +63,7 @@ class ImageToolsPage(QFrame):
         section_layout.addWidget(body)
         section_layout.addSpacing(8)
 
-        for bullet in ("Batch image inputs", "Quality and max-size controls", "Originals stay untouched"):
+        for bullet in ("Batch image inputs", "Quality and max-size controls", "Numbered output names when a file exists"):
             row = QLabel(f"-  {bullet}")
             row.setAccessibleName(bullet)
             section_layout.addWidget(row)

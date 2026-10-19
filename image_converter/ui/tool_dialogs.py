@@ -60,7 +60,8 @@ from image_converter.core.pdf_tools import (
     split_pdf,
 )
 from image_converter.ui.components import format_bytes
-from image_converter.ui.theme import apply_dialog_theme, icon, repolish, set_variant
+from image_converter.ui.theme import FOCUS_RING, apply_dialog_theme, icon, repolish, set_variant
+from image_converter.ui.metadata_evidence import inspect_metadata
 
 
 def fitz_page_to_qpixmap(page: fitz.Page, dpi: int = 72) -> QPixmap:
@@ -703,8 +704,9 @@ class ImageCompressDialog(QDialog):
 
         header = QLabel("Compress Images")
         header.setObjectName("HeaderLabel")
-        sub = QLabel("Create smaller image copies while keeping the originals unchanged.")
+        sub = QLabel("Try smaller image copies. Savings and applied settings vary by image and conversion route.")
         sub.setObjectName("MutedLabel")
+        sub.setWordWrap(True)
         layout.addWidget(header)
         layout.addWidget(sub)
 
@@ -778,7 +780,8 @@ class ImageCompressDialog(QDialog):
         resize_row.addStretch()
         options_layout.addLayout(resize_row)
 
-        self.chk_strip_metadata = QCheckBox("Strip metadata from compressed copies")
+        self.chk_strip_metadata = QCheckBox("Remove supported metadata")
+        self.chk_strip_metadata.setToolTip("Supported fields vary by format. Some same-format routes apply metadata removal without quality or resize changes. If the original is copied because compression made the file larger, its metadata and dimensions remain. Review the output check after processing.")
         self.chk_strip_metadata.setChecked(True)
         options_layout.addWidget(self.chk_strip_metadata)
 
@@ -893,6 +896,8 @@ class ImageCompressDialog(QDialog):
         input_total = 0
         output_total = 0
         last_output_dir: Optional[Path] = None
+        output_checks: List[str] = []
+        unchanged_copies = 0
 
         for source in self.files:
             try:
@@ -920,6 +925,10 @@ class ImageCompressDialog(QDialog):
                 if same_format and output_size > source_size:
                     shutil.copy2(source, destination)
                     output_size = destination.stat().st_size
+                    unchanged_copies += 1
+
+                evidence = inspect_metadata(destination)
+                output_checks.append(f"{destination.name}: {evidence.output_text}")
 
                 successes += 1
                 input_total += source_size
@@ -929,14 +938,35 @@ class ImageCompressDialog(QDialog):
                 failures.append(f"{source.name}: {exc}")
 
         if successes:
-            saved = max(0, input_total - output_total)
-            pct = (saved / input_total * 100.0) if input_total else 0.0
+            saved = input_total - output_total
+            pct = (abs(saved) / input_total * 100.0) if input_total else 0.0
+            change = f"{pct:.1f}% smaller" if saved >= 0 else f"{pct:.1f}% larger"
             msg = (
-                f"{successes} compressed · {format_bytes(input_total)} -> "
-                f"{format_bytes(output_total)} ({pct:.1f}% saved)"
+                f"{successes} output{'s' if successes != 1 else ''} saved · {format_bytes(input_total)} -> "
+                f"{format_bytes(output_total)} ({change})"
             )
+            if unchanged_copies:
+                msg += (
+                    f"\n{unchanged_copies} unchanged cop{'y' if unchanged_copies == 1 else 'ies'} saved because "
+                    "compression produced larger files. Original metadata and dimensions may remain."
+                )
+            self.output_checks = output_checks
+            msg += "\n" + "\n".join(output_checks[:5])
+            if len(output_checks) > 5:
+                msg += f"\n{len(output_checks) - 5} additional output checks are not shown here."
+            msg += "\nMetadata checks cover supported fields only."
             self.lbl_result.setText(f"Complete: {msg}")
-            self.lbl_result.setProperty("state", "success" if not failures else "warning")
+            self.lbl_result.setWordWrap(True)
+            self.lbl_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+            self.lbl_result.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.lbl_result.setAccessibleName("Image compression result")
+            self.lbl_result.setStyleSheet(
+                "QLabel { border: 2px solid transparent; padding: 4px; }"
+                f"QLabel:focus {{ border-color: {FOCUS_RING}; }}"
+            )
+            self.setTabOrder(self.btn_compress, self.lbl_result)
+            self.setTabOrder(self.lbl_result, self.btn_cancel)
+            self.lbl_result.setProperty("state", "warning" if failures or unchanged_copies or saved < 0 else "success")
             repolish(self.lbl_result)
             detail = msg
             if failures:
@@ -983,7 +1013,7 @@ class CompressDialog(QDialog):
         # Header
         header = QLabel("Compress PDF File")
         header.setObjectName("HeaderLabel")
-        sub = QLabel("Reduce file size using image resampling and stream deflation.")
+        sub = QLabel("Try a smaller PDF. Savings and visible changes depend on its content.")
         sub.setObjectName("MutedLabel")
         layout.addWidget(header)
         layout.addWidget(sub)
@@ -1009,12 +1039,15 @@ class CompressDialog(QDialog):
         opt_layout = QVBoxLayout(opt_group)
         opt_layout.setSpacing(10)
 
-        self.rb_balanced = QRadioButton("Balanced (Recommended) — 150 DPI, 75% quality, stream deflation")
+        self.rb_balanced = QRadioButton("Balanced (recommended): reduce image size and quality")
+        self.rb_balanced.setToolTip("Images may be resized to a maximum dimension of 1200 pixels and encoded as JPEG at quality 65. Visible changes are possible.")
         self.rb_balanced.setChecked(True)
 
-        self.rb_max = QRadioButton("Maximum Compression — 100 DPI, 55% quality, smallest file size")
+        self.rb_max = QRadioButton("Stronger compression: more visible changes possible")
+        self.rb_max.setToolTip("Images may be resized to a maximum dimension of 800 pixels and encoded as JPEG at quality 40. Transparency may be removed; a smaller result is not guaranteed.")
 
-        self.rb_lossless = QRadioButton("Lossless — Deflate streams and remove xrefs without altering images")
+        self.rb_lossless = QRadioButton("Keep image quality: try document compression")
+        self.rb_lossless.setToolTip("Compress document data and subset fonts without re-encoding page images. A smaller result is not guaranteed.")
 
         self.btn_group = QButtonGroup(self)
         self.btn_group.addButton(self.rb_balanced)
@@ -1081,7 +1114,7 @@ class CompressDialog(QDialog):
             pct = stats["savings_percent"]
 
             if stats.get("path_taken") == "fallback-copy" or stats.get("saved_bytes", 0) <= 0:
-                msg = f"No reduction was achieved (original was already optimal at {orig_s}). Original file preserved."
+                msg = f"No reduction was achieved with this profile ({orig_s}). An unchanged copy was saved."
                 self.lbl_result.setText(f"Note: {msg}")
                 self.lbl_result.setProperty("state", "warning")
                 repolish(self.lbl_result)

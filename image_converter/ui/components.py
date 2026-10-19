@@ -51,7 +51,8 @@ from image_converter.core.engine import (
     get_image_metadata,
     get_supported_output_formats,
 )
-from image_converter.ui.theme import icon, repolish, set_variant
+from image_converter.ui.theme import FOCUS_RING, icon, repolish, set_variant
+from image_converter.ui.metadata_evidence import MetadataEvidence, inspect_metadata
 
 
 def get_compatible_output_formats(file_path_or_ext: str | Path) -> List[str]:
@@ -168,7 +169,7 @@ class DropZoneWidget(QFrame):
         self.upload_icon = QLabel()
         self.upload_icon.setPixmap(icon("upload").pixmap(52, 52))
         self.upload_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.upload_icon.setAccessibleName("Upload files")
+        self.upload_icon.setAccessibleName("Add local files")
 
         drop_kicker = QLabel("DROP ZONE")
         drop_kicker.setObjectName("Eyebrow")
@@ -350,6 +351,19 @@ class ImagePreviewWidget(QFrame):
 
         layout.addWidget(self.info_frame)
 
+        self.lbl_output_metadata = QLabel()
+        self.lbl_output_metadata.setWordWrap(True)
+        self.lbl_output_metadata.setObjectName("MutedLabel")
+        self.lbl_output_metadata.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.lbl_output_metadata.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.lbl_output_metadata.setAccessibleName("Output metadata check")
+        self.lbl_output_metadata.setStyleSheet(
+            "QLabel { border: 2px solid transparent; padding: 4px; }"
+            f"QLabel:focus {{ border-color: {FOCUS_RING}; }}"
+        )
+        self.lbl_output_metadata.hide()
+        layout.addWidget(self.lbl_output_metadata)
+
         # Quick action buttons for selected file
         action_layout = QHBoxLayout()
         action_layout.setSpacing(8)
@@ -367,6 +381,8 @@ class ImagePreviewWidget(QFrame):
         action_layout.addWidget(self.btn_open_location)
         action_layout.addWidget(self.btn_copy_path)
         layout.addLayout(action_layout)
+        self.setTabOrder(self.lbl_output_metadata, self.btn_open_location)
+        self.setTabOrder(self.btn_open_location, self.btn_copy_path)
 
         layout.addStretch()
 
@@ -393,29 +409,18 @@ class ImagePreviewWidget(QFrame):
 
         p = Path(file_path)
         self.current_file_path = p
+        self.set_output_evidence(None, None)
         self.btn_open_location.setEnabled(True)
         self.btn_copy_path.setEnabled(True)
         ext = p.suffix.lower()
         self.lbl_name.setText(p.name)
         self.lbl_size.setText(format_bytes(p.stat().st_size) if p.exists() else "-")
 
-        # Inspect metadata presence
-        try:
-            from image_converter.core.metadata_engine import get_detailed_metadata
-            d_meta = get_detailed_metadata(p)
-            if d_meta.get("has_metadata"):
-                warn_str = f" ({d_meta['warnings'][0]})" if d_meta.get("warnings") else ""
-                self.lbl_meta_privacy.setText(f"Has metadata{warn_str}")
-                self.lbl_meta_privacy.setProperty("state", "warning")
-            else:
-                self.lbl_meta_privacy.setText("Clean (no tracking tags)")
-                self.lbl_meta_privacy.setProperty("state", "success")
-            repolish(self.lbl_meta_privacy)
-        except Exception as meta_err:
-            logger.debug(f"Could not load metadata privacy info for preview of {p.name}: {meta_err}")
-            self.lbl_meta_privacy.setText("-")
-            self.lbl_meta_privacy.setProperty("state", "")
-            repolish(self.lbl_meta_privacy)
+        evidence = inspect_metadata(p)
+        self.lbl_meta_privacy.setText(evidence.summary)
+        self.lbl_meta_privacy.setToolTip(evidence.detail or "This check covers supported fields only.")
+        self.lbl_meta_privacy.setProperty("state", "warning" if evidence.status in {"found", "failed"} else "")
+        repolish(self.lbl_meta_privacy)
 
         try:
             meta = get_file_metadata(p)
@@ -537,8 +542,21 @@ class ImagePreviewWidget(QFrame):
             self.lbl_dim.setText("-")
             self.lbl_format.setText(ext.lstrip(".").upper())
 
+    def set_output_evidence(self, output_path: Optional[Path], evidence: Optional[MetadataEvidence]):
+        self.lbl_output_metadata.setVisible(evidence is not None)
+        if evidence is not None:
+            detail = f"{evidence.output_text}\n{output_path}\nThis check covers supported fields only."
+            if evidence.fields:
+                detail += "\nFields found: " + ", ".join(evidence.fields)
+            if evidence.detail:
+                detail += "\n" + evidence.detail
+            self.lbl_output_metadata.setText(detail)
+        else:
+            self.lbl_output_metadata.clear()
+
     def clear_preview(self):
         self.current_file_path = None
+        self.set_output_evidence(None, None)
         self.btn_open_location.setEnabled(False)
         self.btn_copy_path.setEnabled(False)
         self.preview_lbl.setPixmap(QPixmap())
@@ -623,7 +641,7 @@ class ConversionSettingsWidget(QFrame):
         fmt_lbl.setObjectName("SectionTitle")
         self.combo_format = QComboBox()
         self.combo_format.setAccessibleName("Default output format")
-        self.combo_format.setAccessibleDescription("Formats valid for every file in the queue.")
+        self.combo_format.setAccessibleDescription("Output choices for this queue. Availability depends on the conversion route and installed tools.")
         self.combo_format.setMinimumHeight(36)
         self.combo_format.currentTextChanged.connect(self._on_format_changed)
         fmt_layout.addWidget(fmt_lbl)
@@ -822,19 +840,20 @@ class ConversionSettingsWidget(QFrame):
         doc_tab_layout.addWidget(self.frame_sheet)
 
         # OCR Group
-        doc_sec_box = QGroupBox("Document OCR & Decryption")
+        doc_sec_box = QGroupBox("PDF text recognition and password")
         doc_sec_layout = QVBoxLayout(doc_sec_box)
         doc_sec_layout.setSpacing(8)
 
-        self.chk_enable_ocr = QCheckBox("Enable OCR Text Fallback")
-        self.chk_enable_ocr.setToolTip("Use OCR fallback when converting scanned PDFs or images to text/DOCX")
+        self.chk_enable_ocr = QCheckBox("Recognize scanned PDF text (OCR)")
+        self.chk_enable_ocr.setToolTip("Use OCR fallback for PDF to TXT or DOCX when text is missing. Image to TXT always uses OCR; image to DOCX embeds the image. OCR requires a local Tesseract installation.")
         self.chk_enable_ocr.toggled.connect(self.settings_changed)
         doc_sec_layout.addWidget(self.chk_enable_ocr)
 
         pwd_layout = QHBoxLayout()
         pwd_layout.addWidget(QLabel("Password:"))
         self.line_password = QLineEdit()
-        self.line_password.setPlaceholderText("Encrypted PDF / Word...")
+        self.line_password.setPlaceholderText("Password for supported PDF routes")
+        self.line_password.setToolTip("Used by supported PDF conversions and PDF metadata removal. Word conversion routes do not use this field.")
         self.line_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.line_password.textChanged.connect(self.settings_changed)
         pwd_layout.addWidget(self.line_password)
@@ -850,19 +869,20 @@ class ConversionSettingsWidget(QFrame):
         priv_tab_layout.setContentsMargins(8, 12, 8, 8)
         priv_tab_layout.setSpacing(10)
 
-        meta_box = QGroupBox("Metadata Cleaning & Sanitization")
+        meta_box = QGroupBox("Metadata removal")
         meta_layout = QVBoxLayout(meta_box)
         meta_layout.setSpacing(8)
 
-        self.chk_strip_metadata = QCheckBox("Strip all metadata from output")
+        self.chk_strip_metadata = QCheckBox("Remove supported metadata")
         self.chk_strip_metadata.setToolTip(
-            "Strip all personal identifiable information, author properties, "
-            "camera/device tags, GPS coordinates, and timestamps across all formats."
+            "Request removal of supported metadata, such as author, GPS and timestamps, where the "
+            "format and conversion route allow. Review the output check after processing."
         )
         self.chk_strip_metadata.setChecked(False)
         self.chk_strip_metadata.toggled.connect(self._on_strip_metadata_toggled)
 
-        self.chk_preserve_exif = QCheckBox("Preserve EXIF Metadata (Images)")
+        self.chk_preserve_exif = QCheckBox("Keep supported EXIF metadata")
+        self.chk_preserve_exif.setToolTip("Keep EXIF where the image conversion route supports it. This does not preserve every metadata field.")
         self.chk_preserve_exif.setChecked(True)
         self.chk_preserve_exif.toggled.connect(self.settings_changed)
 
@@ -876,7 +896,10 @@ class ConversionSettingsWidget(QFrame):
         priv_tab_layout.addWidget(meta_box)
 
         lbl_priv_help = QLabel(
-            "Privacy mode removes author information, revision history, device details, and GPS tags."
+            "Removal varies by format and conversion route. Some metadata may remain. "
+            "Some same-format routes apply metadata removal without quality or resize changes. "
+            "Document content and revision history are not comprehensively inspected. "
+            "Output checks report supported fields found after processing."
         )
         lbl_priv_help.setObjectName("MutedLabel")
         lbl_priv_help.setWordWrap(True)
@@ -981,15 +1004,16 @@ class ConversionSettingsWidget(QFrame):
             "JPG": "Compact and widely compatible. Best for photos without transparency.",
             "JPEG": "Compact and widely compatible. Best for photos without transparency.",
             "PNG": "Lossless image output with transparency support.",
-            "WEBP": "Modern image output with excellent compression.",
+            "WEBP": "WebP image output. File size varies by content and quality.",
             "PDF": "Portable document output for sharing, printing, and archiving.",
-            "DOCX": "Editable Microsoft Word document output.",
+            "DOCX": "Word document output. Image inputs are embedded as pictures, without text recognition.",
             "XLSX": "Editable Microsoft Excel workbook output.",
             "CSV": "Simple tabular data for broad compatibility.",
             "TXT": "Plain text output without formatting.",
             "JSON": "Structured text output for software workflows.",
             "HTML": "Web-ready document or tabular output.",
             "STRIP_METADATA": "Keep the file format while removing supported metadata.",
+            "PPTX": "PowerPoint output. Some advertised input routes are unavailable and may report unsupported.",
             "PER_FILE": "This mixed queue has no single common output. Each row keeps its compatible target.",
         }
         self.lbl_format_summary.setText(

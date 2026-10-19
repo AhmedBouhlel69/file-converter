@@ -1,0 +1,864 @@
+diff --git a/image_converter/ui/theme.py b/image_converter/ui/theme.py
+--- a/image_converter/ui/theme.py
++++ b/image_converter/ui/theme.py
+@@ -4,7 +4,8 @@
+ 
+ from pathlib import Path
+ 
+-from PySide6.QtGui import QFont, QIcon
++from PySide6.QtCore import Qt
++from PySide6.QtGui import QColor, QFont, QIcon, QPalette
+ from PySide6.QtWidgets import QLabel, QWidget
+ 
+ 
+@@ -69,21 +70,29 @@
+     "secondary": TYPE_SCALE["secondary"],
+     "eyebrow": TYPE_SCALE["eyebrow"],
+     "chevron_down": CHEVRON_DOWN,
++    "chevron_up": (ASSET_DIR / "chevron-up.svg").as_posix(),
++    "spin_down": (ASSET_DIR / "spin-down.svg").as_posix(),
++    "chevron_up_disabled": (ASSET_DIR / "chevron-up-disabled.svg").as_posix(),
++    "chevron_down_disabled": (ASSET_DIR / "chevron-down-disabled.svg").as_posix(),
++    "check_mark": (ASSET_DIR / "check-mark.svg").as_posix(),
++    "check_partial": (ASSET_DIR / "check-partial.svg").as_posix(),
++    "radio_dot": (ASSET_DIR / "radio-dot.svg").as_posix(),
+ }
+ 
+ 
+ QSS_TEMPLATE = r"""
++QWidget {{
++    background-color: transparent;
++    color: {text_primary};
++    font-family: "Segoe UI", Arial, sans-serif;
++}}
++
++/* Keep opaque top-level surfaces after the transparent child-widget rule. */
+ QMainWindow, QDialog, QWidget#centralWidget {{
+     background-color: {bg};
+     color: {text_primary};
+     font-family: "Segoe UI", Arial, sans-serif;
+     font-size: {body}px;
+-}}
+-
+-QWidget {{
+-    background-color: transparent;
+-    color: {text_primary};
+-    font-family: "Segoe UI", Arial, sans-serif;
+ }}
+ 
+ QToolTip {{
+@@ -365,10 +374,78 @@
+     padding: 6px 9px;
+ }}
+ 
+-QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled {{
++QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {{
+     background-color: #0B1725;
+     color: {disabled};
+     border-color: #30445B;
++}}
++
++QSpinBox, QDoubleSpinBox {{
++    padding-right: 29px;
++    min-height: 20px;
++}}
++
++QSpinBox:focus, QDoubleSpinBox:focus {{
++    padding-right: 28px;
++}}
++
++QSpinBox::up-button, QDoubleSpinBox::up-button {{
++    subcontrol-origin: border;
++    subcontrol-position: top right;
++    width: 24px;
++    background-color: {surface_2};
++    border-left: 1px solid {border};
++    border-top-right-radius: 9px;
++}}
++
++QSpinBox::down-button, QDoubleSpinBox::down-button {{
++    subcontrol-origin: border;
++    subcontrol-position: bottom right;
++    width: 24px;
++    background-color: {surface_2};
++    border-left: 1px solid {border};
++    border-top: 1px solid {border};
++    border-bottom-right-radius: 9px;
++}}
++
++QSpinBox::up-button:hover, QSpinBox::down-button:hover,
++QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
++    background-color: #29415E;
++}}
++
++QSpinBox::up-button:pressed, QSpinBox::down-button:pressed,
++QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {{
++    background-color: {selection};
++}}
++
++QSpinBox::up-button:disabled, QSpinBox::down-button:disabled,
++QDoubleSpinBox::up-button:disabled, QDoubleSpinBox::down-button:disabled,
++QSpinBox::up-button:off, QSpinBox::down-button:off,
++QDoubleSpinBox::up-button:off, QDoubleSpinBox::down-button:off {{
++    background-color: #0B1725;
++    border-color: #30445B;
++}}
++
++QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
++    image: url("{chevron_up}");
++    width: 14px;
++    height: 14px;
++}}
++
++QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
++    image: url("{spin_down}");
++    width: 14px;
++    height: 14px;
++}}
++
++QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
++QSpinBox::up-arrow:off, QDoubleSpinBox::up-arrow:off {{
++    image: url("{chevron_up_disabled}");
++}}
++
++QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled,
++QSpinBox::down-arrow:off, QDoubleSpinBox::down-arrow:off {{
++    image: url("{chevron_down_disabled}");
+ }}
+ 
+ QComboBox::drop-down {{
+@@ -413,12 +490,12 @@
+     width: 16px;
+     height: 16px;
+     background-color: #091625;
+-    border: 1px solid #65809E;
++    border: 2px solid #65809E;
+     border-radius: 4px;
+ }}
+ 
+ QRadioButton::indicator {{
+-    border-radius: 8px;
++    border-radius: 10px;
+ }}
+ 
+ QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+@@ -430,8 +507,36 @@
+     border-color: #A89DFF;
+ }}
+ 
+-QCheckBox:focus, QRadioButton:focus {{
+-    color: {focus_ring};
++QCheckBox::indicator:checked {{
++    image: url("{check_mark}");
++}}
++
++QCheckBox::indicator:indeterminate {{
++    background-color: {accent};
++    border-color: #A89DFF;
++    image: url("{check_partial}");
++}}
++
++QRadioButton::indicator:checked {{
++    image: url("{radio_dot}");
++}}
++
++QCheckBox:disabled, QRadioButton:disabled {{
++    color: {disabled};
++}}
++
++QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
++    background-color: #0B1725;
++    border-color: #30445B;
++}}
++
++QCheckBox::indicator:checked:disabled, QCheckBox::indicator:indeterminate:disabled,
++QRadioButton::indicator:checked:disabled {{
++    background-color: #25344A;
++}}
++
++QCheckBox::indicator:focus, QRadioButton::indicator:focus {{
++    border-color: {focus_ring};
+ }}
+ 
+ QGroupBox {{
+@@ -642,6 +747,28 @@
+ def apply_theme(target) -> None:
+     """Install the one centralized stylesheet on an app or top-level widget."""
+     target.setStyleSheet(DARK_STYLESHEET)
++
++
++def apply_dialog_theme(dialog: QWidget) -> None:
++    """Give standalone utility dialogs explicit surfaces under any OS palette."""
++    palette = QPalette(dialog.palette())
++    colors = {
++        QPalette.ColorRole.Window: BG,
++        QPalette.ColorRole.WindowText: TEXT_PRIMARY,
++        QPalette.ColorRole.Text: TEXT_PRIMARY,
++        QPalette.ColorRole.Base: "#091625",
++        QPalette.ColorRole.Button: SURFACE_2,
++        QPalette.ColorRole.ButtonText: TEXT_PRIMARY,
++        QPalette.ColorRole.Highlight: ACCENT,
++        QPalette.ColorRole.HighlightedText: "#FFFFFF",
++    }
++    for role, color in colors.items():
++        palette.setColor(role, QColor(color))
++    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText):
++        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(DISABLED))
++    dialog.setPalette(palette)
++    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
++    apply_theme(dialog)
+ 
+ 
+ def repolish(widget: QWidget) -> None:
+diff --git a/image_converter/ui/contrast.py b/image_converter/ui/contrast.py
+--- a/image_converter/ui/contrast.py
++++ b/image_converter/ui/contrast.py
+@@ -76,6 +76,50 @@
+     return ratios
+ 
+ 
++def assert_rendered_label_contrast(surface, minimum: float = 4.5) -> dict[str, float]:
++    """Audit visible labels against their rendered, opaque backing surface.
++
++    Call after showing/polishing the widget. Label perimeters avoid glyph pixels;
++    sampling the render also catches a transparent dialog root, which a token
++    or palette-only audit would miss.
++    """
++    from collections import Counter
++
++    from PySide6.QtCore import QPoint
++    from PySide6.QtGui import QColor
++    from PySide6.QtWidgets import QLabel
++
++    rendered = surface.grab().toImage()
++    device_ratio = rendered.devicePixelRatio()
++    ratios: dict[str, float] = {}
++    failures = []
++    for index, label in enumerate(surface.findChildren(QLabel)):
++        if not label.text() or not label.isVisibleTo(surface) or label.width() < 2 or label.height() < 2:
++            continue
++        origin = label.mapTo(surface, QPoint(0, 0))
++        # Sample the whole perimeter so a glyph touching one corner cannot
++        # masquerade as the background (notably with fallback fonts).
++        perimeter = [origin + QPoint(x, y) for x in range(label.width()) for y in (0, label.height() - 1)]
++        perimeter.extend(origin + QPoint(x, y) for y in range(1, label.height() - 1) for x in (0, label.width() - 1))
++        physical_points = [QPoint(round(point.x() * device_ratio), round(point.y() * device_ratio)) for point in perimeter]
++        samples = [rendered.pixelColor(point) for point in physical_points if rendered.rect().contains(point)]
++        if not samples:
++            continue
++        background = QColor.fromRgba(Counter(color.rgba() for color in samples).most_common(1)[0][0])
++        name = f"{label.objectName() or 'label'}[{index}] {label.text()[:60]}"
++        if background.alpha() != 255:
++            failures.append(f"{name}: backing surface is transparent")
++            continue
++        foreground = label.palette().color(label.foregroundRole())
++        ratio = contrast_ratio(foreground.name(), background.name())
++        ratios[name] = ratio
++        if ratio < minimum:
++            failures.append(f"{name}: {ratio:.2f}:1 on {background.name()}")
++    if failures:
++        raise AssertionError("Rendered label contrast failed: " + "; ".join(failures))
++    return ratios
++
++
+ if __name__ == "__main__":
+     for pair, ratio in assert_theme_contrast().items():
+         print(f"{pair}: {ratio:.2f}:1")
+diff --git a/image_converter/ui/tool_dialogs.py b/image_converter/ui/tool_dialogs.py
+--- a/image_converter/ui/tool_dialogs.py
++++ b/image_converter/ui/tool_dialogs.py
+@@ -60,7 +60,7 @@
+     split_pdf,
+ )
+ from image_converter.ui.components import format_bytes
+-from image_converter.ui.theme import icon, repolish, set_variant
++from image_converter.ui.theme import apply_dialog_theme, icon, repolish, set_variant
+ 
+ 
+ def fitz_page_to_qpixmap(page: fitz.Page, dpi: int = 72) -> QPixmap:
+@@ -82,6 +82,7 @@
+ 
+     def __init__(self, initial_files: Optional[List[Path]] = None, parent=None):
+         super().__init__(parent)
++        apply_dialog_theme(self)
+         self.setWindowTitle("Merge Files to PDF")
+         self.resize(650, 520)
+         self.setMinimumSize(500, 400)
+@@ -289,6 +290,7 @@
+ 
+     def __init__(self, initial_file: Optional[Path] = None, parent=None):
+         super().__init__(parent)
++        apply_dialog_theme(self)
+         self.setWindowTitle("Split PDF")
+         self.resize(520, 420)
+ 
+@@ -465,6 +467,7 @@
+ 
+     def __init__(self, initial_file: Optional[Path] = None, parent=None):
+         super().__init__(parent)
++        apply_dialog_theme(self)
+         self.setWindowTitle("Reorganize PDF Pages")
+         self.resize(780, 560)
+ 
+@@ -682,6 +685,7 @@
+ 
+     def __init__(self, initial_files: Optional[List[Path]] = None, parent=None):
+         super().__init__(parent)
++        apply_dialog_theme(self)
+         self.setWindowTitle("Compress Images")
+         self.resize(680, 540)
+         self.setMinimumSize(560, 430)
+@@ -962,6 +966,7 @@
+ 
+     def __init__(self, initial_file: Optional[Path] = None, parent=None):
+         super().__init__(parent)
++        apply_dialog_theme(self)
+         self.setWindowTitle("Compress PDF")
+         self.resize(500, 360)
+ 
+diff --git a/image_converter/ui/dev_capture_states.py b/image_converter/ui/dev_capture_states.py
+--- a/image_converter/ui/dev_capture_states.py
++++ b/image_converter/ui/dev_capture_states.py
+@@ -7,8 +7,10 @@
+ from __future__ import annotations
+ 
+ import argparse
++import json
+ import os
+ import sys
++import time
+ from pathlib import Path
+ 
+ # This must be configured before any Qt import.
+@@ -18,13 +20,17 @@
+ from docx import Document
+ from openpyxl import Workbook
+ from PIL import Image, ImageDraw
+-from PySide6.QtCore import QThreadPool
++from PySide6.QtCore import QThreadPool, Qt
+ from PySide6.QtGui import QFontDatabase
+-from PySide6.QtTest import QTest
+-from PySide6.QtWidgets import QApplication
++from PySide6.QtWidgets import (
++    QApplication, QCheckBox, QDialog, QGridLayout, QLabel, QSpinBox,
++)
+ 
+ from image_converter.ui.main_window import ImageConverterMainWindow
+ from image_converter.ui.theme import apply_theme, set_variant
++from image_converter.ui.tool_dialogs import (
++    CompressDialog, ImageCompressDialog, MergeDialog, OrganizePagesDialog, SplitDialog,
++)
+ 
+ 
+ def _load_offscreen_font() -> None:
+@@ -49,7 +55,7 @@
+     for number in range(1, 4):
+         page = pdf.new_page()
+         page.insert_text((72, 96), f"Quarterly report — page {number}", fontsize=20)
+-    pdf.save(pdf_path)
++    pdf_path.write_bytes(pdf.tobytes())
+     pdf.close()
+ 
+     document_path = folder / "meeting-notes.docx"
+@@ -70,8 +76,10 @@
+ 
+ 
+ def _settle(app: QApplication, milliseconds: int = 250) -> None:
+-    app.processEvents()
+-    QTest.qWait(milliseconds)
++    deadline = time.monotonic() + milliseconds / 1000
++    while time.monotonic() < deadline:
++        app.processEvents()
++        time.sleep(0.01)
+     app.processEvents()
+ 
+ 
+@@ -104,7 +112,10 @@
+     window.drag_overlay.hide()
+ 
+     samples = _create_samples(output_dir / "samples")
+-    window.add_images(samples)
++    window.add_images(samples[:1])
++    _settle(app, 500)
++    capture("03-single-type")
++    window.add_images(samples[1:])
+     _settle(app, 1100)
+     capture("03-populated-mixed")
+ 
+@@ -128,17 +139,19 @@
+     capture("05-converting")
+ 
+     window._is_converting = False
+-    window._footer_state = "completed"
+     window._set_queue_editing_enabled(True)
+-    for row, entry in enumerate(model.entries):
+-        model.update_status(row, "Done", progress=100)
+-        model.update_output_size(row, max(1, int(entry.input_size * 0.72)))
+-    window.progress_bar.hide()
+-    window.btn_open_folder.show()
+-    window.btn_convert_more.show()
+-    window.lbl_status.setText(f"{model.rowCount()} converted · 1.4 MB → 980 KB")
+-    window.lbl_status_hint.setText("Completed in 1.42s. Your originals were not changed.")
+-    window._refresh_queue_ui(update_status=False)
++    for row, target in enumerate(("WEBP", "TXT", "TXT", "CSV")):
++        window.queue_table.set_target_format_for_row(row, target)
++    window.start_conversion()
++    deadline = time.monotonic() + 20
++    while window._is_converting and time.monotonic() < deadline:
++        app.processEvents()
++        time.sleep(0.01)
++    if window._is_converting:
++        window._cancel_conversion()
++        raise RuntimeError("Sample conversion did not finish within 20 seconds")
++    if any(entry.status not in ("Done", "Warning") for entry in model.entries):
++        raise RuntimeError("A sample conversion failed; completed captures must use real outputs")
+     capture("06-completed")
+ 
+     model.update_status(0, "Failed", progress=0, error="The sample file could not be decoded.")
+@@ -151,11 +164,97 @@
+     capture("07-error")
+ 
+     window._set_app_mode(1)
+-    capture("08-pdf-tools")
++    capture("08-image-tools")
++    window._set_app_mode(2)
++    for index, name in enumerate(("merge", "split", "organize", "compress")):
++        window.pdf_tools_page.set_active_tool(index)
++        capture(f"09-pdf-{name}")
++    window._set_app_mode(3)
++    window.background_removal_page.add_files([samples[0]])
++    capture("10-background")
++    window.background_removal_page.btn_advanced.setChecked(True)
++    capture("11-background-advanced")
+ 
+     window.close()
+     QThreadPool.globalInstance().waitForDone(3000)
+     app.processEvents()
++    captured.extend(capture_dialogs(output_dir, samples, width, height))
++    (output_dir / "manifest.json").write_text(json.dumps({
++        "logical_size": [width, height],
++        "platform": app.platformName(),
++        "captures": [path.name for path in captured],
++        "fixtures": "Running and failure queue states are layout fixtures. Completed sizes come from a real sample batch.",
++        "native_windows_dpi_or_assistive_technology_verified": False,
++    }, indent=2), encoding="utf-8")
++    return captured
++
++
++def capture_dialogs(output_dir: Path, samples: list[Path], width: int, height: int) -> list[Path]:
++    """Render every utility dialog plus checked/mixed/disabled/focused controls."""
++    app = QApplication.instance()
++    captured = []
++    dialogs = (
++        ("merge", lambda: MergeDialog(initial_files=samples[:2])),
++        ("split", lambda: SplitDialog(initial_file=samples[1])),
++        ("organize", lambda: OrganizePagesDialog(initial_file=samples[1])),
++        ("compress-pdf", lambda: CompressDialog(initial_file=samples[1])),
++        ("compress-images", lambda: ImageCompressDialog(initial_files=[samples[0]])),
++    )
++    for name, factory in dialogs:
++        dialog = factory()
++        dialog.resize(width, height)
++        dialog.show()
++        _settle(app)
++        path = output_dir / f"12-dialog-{name}.png"
++        if not dialog.grab().save(str(path)):
++            raise RuntimeError(f"Could not save {path}")
++        captured.append(path)
++        dialog.close()
++    dialog = QDialog()
++    dialog.setWindowTitle("Control state audit")
++    apply_theme(dialog)
++    grid = QGridLayout(dialog)
++    for row, (name, state, enabled) in enumerate((
++        ("Unchecked", Qt.CheckState.Unchecked, True),
++        ("Checked", Qt.CheckState.Checked, True),
++        ("Indeterminate", Qt.CheckState.PartiallyChecked, True),
++        ("Disabled unchecked", Qt.CheckState.Unchecked, False),
++        ("Disabled checked", Qt.CheckState.Checked, False),
++        ("Disabled indeterminate", Qt.CheckState.PartiallyChecked, False),
++    )):
++        check = QCheckBox(name)
++        check.setAccessibleName(name)
++        check.setTristate(True)
++        check.setCheckState(state)
++        check.setEnabled(enabled)
++        grid.addWidget(check, row, 0)
++        spin = QSpinBox()
++        spin.setAccessibleName(f"{name} stepper")
++        spin.setRange(0, 100)
++        spin.setValue(42)
++        spin.setEnabled(enabled)
++        grid.addWidget(spin, row, 1)
++    focused = QCheckBox("Keyboard focus")
++    focused.setAccessibleName("Focused checkbox")
++    focused.setChecked(True)
++    grid.addWidget(focused, 6, 0)
++    for row, (name, value) in enumerate((("Minimum", 0), ("Maximum", 100)), start=7):
++        grid.addWidget(QLabel(name), row, 0)
++        spin = QSpinBox()
++        spin.setAccessibleName(f"{name} stepper")
++        spin.setRange(0, 100)
++        spin.setValue(value)
++        grid.addWidget(spin, row, 1)
++    grid.addWidget(QLabel("Tab to inspect checkbox and spinbox focus."), 9, 0, 1, 2)
++    dialog.resize(width, height)
++    dialog.show()
++    focused.setFocus(Qt.FocusReason.TabFocusReason)
++    _settle(app)
++    path = output_dir / "13-control-states.png"
++    if not dialog.grab().save(str(path)):
++        raise RuntimeError(f"Could not save {path}")
++    captured.append(path)
++    dialog.close()
+     return captured
+ 
+ 
+diff --git a/image_converter/tests/test_ui_rendering.py b/image_converter/tests/test_ui_rendering.py
+new file mode 100644
+--- /dev/null
++++ b/image_converter/tests/test_ui_rendering.py
+@@ -0,0 +1,287 @@
++"""Rendered regressions for dialog surfaces and native form controls."""
++
++from __future__ import annotations
++
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
++
++import pytest
++from PySide6.QtCore import QRect, Qt
++from PySide6.QtGui import QColor, QFontDatabase, QPalette
++from PySide6.QtTest import QTest
++from PySide6.QtWidgets import (
++    QApplication,
++    QCheckBox,
++    QDoubleSpinBox,
++    QLabel,
++    QRadioButton,
++    QSpinBox,
++    QStyle,
++    QStyleOptionButton,
++    QStyleOptionSpinBox,
++    QVBoxLayout,
++    QWidget,
++)
++
++from image_converter.ui.contrast import assert_rendered_label_contrast, assert_theme_contrast
++from image_converter.ui.theme import BG, FOCUS_RING, TEXT_PRIMARY, TEXT_SECONDARY, apply_theme
++from image_converter.ui.tool_dialogs import (
++    CompressDialog,
++    ImageCompressDialog,
++    MergeDialog,
++    OrganizePagesDialog,
++    SplitDialog,
++)
++
++
++@pytest.fixture(scope="module")
++def qapp():
++    app = QApplication.instance() or QApplication([])
++    # Windows' offscreen plugin does not discover installed system fonts.
++    segoe = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "segoeui.ttf"
++    if segoe.exists():
++        QFontDatabase.addApplicationFont(str(segoe))
++    return app
++
++
++@pytest.fixture
++def light_os_palette(qapp):
++    previous_palette = QPalette(qapp.palette())
++    previous_stylesheet = qapp.styleSheet()
++    qapp.setStyleSheet("")
++    light = QPalette()
++    for role in (QPalette.ColorRole.Window, QPalette.ColorRole.Base, QPalette.ColorRole.Button):
++        light.setColor(role, QColor("#FFFFFF"))
++    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText):
++        light.setColor(role, QColor("#000000"))
++    qapp.setPalette(light)
++    yield
++    qapp.setPalette(previous_palette)
++    qapp.setStyleSheet(previous_stylesheet)
++
++
++@pytest.mark.parametrize("dialog_class", [MergeDialog, SplitDialog, OrganizePagesDialog, CompressDialog, ImageCompressDialog])
++def test_dialog_labels_contrast_on_actual_opaque_surface(qapp, light_os_palette, dialog_class):
++    dialog = dialog_class()
++    try:
++        dialog.show()
++        qapp.processEvents()
++        root = dialog.grab().toImage().pixelColor(1, 1)
++        assert root.alpha() == 255
++        assert root.name() == BG.lower()
++        assert dialog.palette().color(QPalette.ColorRole.Window).name() == BG.lower()
++        assert dialog.findChild(QLabel, "HeaderLabel").palette().color(QPalette.ColorRole.WindowText).name() == TEXT_PRIMARY.lower()
++        assert dialog.findChild(QLabel, "MutedLabel").palette().color(QPalette.ColorRole.WindowText).name() == TEXT_SECONDARY.lower()
++        ratios = assert_rendered_label_contrast(dialog)
++        assert ratios
++        assert min(ratios.values()) >= 4.5
++        assert_theme_contrast()
++    finally:
++        dialog.close()
++
++
++def _indicator_image(control):
++    option = QStyleOptionButton()
++    option.initFrom(control)
++    element = QStyle.SubElement.SE_RadioButtonIndicator if isinstance(control, QRadioButton) else QStyle.SubElement.SE_CheckBoxIndicator
++    rect = control.style().subElementRect(element, option, control)
++    return _rendered_region(control, rect)
++
++
++def _rendered_region(widget, logical_rect):
++    rendered = widget.grab().toImage()
++    device_ratio = rendered.devicePixelRatio()
++    physical_rect = QRect(
++        round(logical_rect.x() * device_ratio),
++        round(logical_rect.y() * device_ratio),
++        round(logical_rect.width() * device_ratio),
++        round(logical_rect.height() * device_ratio),
++    )
++    return rendered.copy(physical_rect)
++
++
++def _count_color(image, target: str, tolerance: int = 15):
++    expected = QColor(target)
++    return sum(
++        1
++        for y in range(image.height())
++        for x in range(image.width())
++        if max(abs(image.pixelColor(x, y).red() - expected.red()),
++               abs(image.pixelColor(x, y).green() - expected.green()),
++               abs(image.pixelColor(x, y).blue() - expected.blue())) <= tolerance
++    )
++
++
++@pytest.mark.parametrize("enabled", [True, False])
++@pytest.mark.parametrize("state", [Qt.CheckState.Unchecked, Qt.CheckState.Checked, Qt.CheckState.PartiallyChecked])
++def test_checkbox_state_has_visible_mark_and_disabled_treatment(qapp, state, enabled):
++    surface = QWidget()
++    apply_theme(surface)
++    layout = QVBoxLayout(surface)
++    checkbox = QCheckBox("Remove supported metadata")
++    checkbox.setTristate(True)
++    checkbox.setCheckState(state)
++    checkbox.setEnabled(enabled)
++    checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
++    layout.addWidget(checkbox)
++    surface.show()
++    qapp.processEvents()
++    try:
++        indicator = _indicator_image(checkbox)
++        marks = _count_color(indicator, "#FFFFFF")
++        assert (marks >= 8) if state != Qt.CheckState.Unchecked else (marks == 0)
++        if not enabled:
++            assert checkbox.palette().color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText).name() == "#8092a8"
++    finally:
++        surface.close()
++
++
++def test_checkbox_focus_ring_and_radio_dot_render(qapp):
++    surface = QWidget()
++    apply_theme(surface)
++    layout = QVBoxLayout(surface)
++    checkbox = QCheckBox("Fit within")
++    radio = QRadioButton("Balanced")
++    radio.setChecked(True)
++    layout.addWidget(checkbox)
++    layout.addWidget(radio)
++    surface.show()
++    surface.activateWindow()
++    checkbox.setFocus()
++    qapp.processEvents()
++    try:
++        assert checkbox.hasFocus()
++        assert _count_color(_indicator_image(checkbox), FOCUS_RING) >= 8
++        assert _count_color(_indicator_image(radio), "#FFFFFF") >= 8
++    finally:
++        surface.close()
++
++
++@pytest.mark.parametrize("control_class", [QCheckBox, QRadioButton])
++def test_indicator_focus_preserves_geometry_and_label_position(qapp, control_class):
++    surface = QWidget()
++    apply_theme(surface)
++    layout = QVBoxLayout(surface)
++    control = control_class("A stable focus target")
++    focus_sink = QSpinBox()
++    layout.addWidget(control)
++    layout.addWidget(focus_sink)
++    surface.show()
++    surface.activateWindow()
++    try:
++        indicator_element = QStyle.SubElement.SE_RadioButtonIndicator if isinstance(control, QRadioButton) else QStyle.SubElement.SE_CheckBoxIndicator
++        contents_element = QStyle.SubElement.SE_RadioButtonContents if isinstance(control, QRadioButton) else QStyle.SubElement.SE_CheckBoxContents
++        geometry = []
++        for target in (focus_sink, control):
++            target.setFocus()
++            qapp.processEvents()
++            option = QStyleOptionButton()
++            option.initFrom(control)
++            indicator = control.style().subElementRect(indicator_element, option, control)
++            contents = control.style().subElementRect(contents_element, option, control)
++            assert control.rect().contains(indicator)
++            geometry.append((indicator, contents.x()))
++        assert control.hasFocus()
++        assert geometry[0] == geometry[1]
++    finally:
++        surface.close()
++
++
++@pytest.mark.parametrize("spinbox_class", [QSpinBox, QDoubleSpinBox])
++def test_spinbox_step_buttons_fit_and_have_visible_working_arrows(qapp, spinbox_class):
++    surface = QWidget()
++    apply_theme(surface)
++    layout = QVBoxLayout(surface)
++    spinbox = spinbox_class()
++    spinbox.setRange(0, 100)
++    spinbox.setValue(50)
++    layout.addWidget(spinbox)
++    surface.show()
++    qapp.processEvents()
++    try:
++        option = QStyleOptionSpinBox()
++        spinbox.initStyleOption(option)
++        style = spinbox.style()
++        up = style.subControlRect(QStyle.ComplexControl.CC_SpinBox, option, QStyle.SubControl.SC_SpinBoxUp, spinbox)
++        down = style.subControlRect(QStyle.ComplexControl.CC_SpinBox, option, QStyle.SubControl.SC_SpinBoxDown, spinbox)
++        edit = style.subControlRect(QStyle.ComplexControl.CC_SpinBox, option, QStyle.SubControl.SC_SpinBoxEditField, spinbox)
++        for button in (up, down):
++            assert spinbox.rect().contains(button)
++            assert button.width() >= 20
++            assert button.height() >= 14
++            assert not button.intersects(edit)
++            assert _count_color(_rendered_region(spinbox, button), "#DCE8F7", tolerance=25) >= 4
++        QTest.mouseClick(spinbox, Qt.MouseButton.LeftButton, pos=up.center())
++        assert spinbox.value() == 51
++        QTest.mouseClick(spinbox, Qt.MouseButton.LeftButton, pos=down.center())
++        assert spinbox.value() == 50
++    finally:
++        surface.close()
++
++
++@pytest.mark.parametrize("spinbox_class", [QSpinBox, QDoubleSpinBox])
++@pytest.mark.parametrize("value,enabled,up_available,down_available", [(0, True, True, False), (100, True, False, True), (50, False, False, False)])
++def test_spinbox_limits_and_disabled_arrows_are_visibly_inactive(qapp, spinbox_class, value, enabled, up_available, down_available):
++    surface = QWidget()
++    apply_theme(surface)
++    layout = QVBoxLayout(surface)
++    spinbox = spinbox_class()
++    spinbox.setRange(0, 100)
++    spinbox.setValue(value)
++    spinbox.setEnabled(enabled)
++    layout.addWidget(spinbox)
++    surface.show()
++    qapp.processEvents()
++    try:
++        option = QStyleOptionSpinBox()
++        spinbox.initStyleOption(option)
++        for subcontrol, available in ((QStyle.SubControl.SC_SpinBoxUp, up_available), (QStyle.SubControl.SC_SpinBoxDown, down_available)):
++            rect = spinbox.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, option, subcontrol, spinbox)
++            region = _rendered_region(spinbox, rect)
++            expected = "#DCE8F7" if available else "#8092A8"
++            assert _count_color(region, expected, tolerance=25) >= 4
++            if not available:
++                assert _count_color(region, "#DCE8F7", tolerance=25) == 0
++    finally:
++        surface.close()
++
++
++def test_rendered_contrast_rejects_white_on_white_at_200_percent_scaling():
++    script = r'''
++from PySide6.QtWidgets import QApplication, QLabel, QWidget
++from image_converter.ui.contrast import assert_rendered_label_contrast
++from image_converter.ui.theme import apply_theme
++
++app = QApplication([])
++surface = QWidget()
++surface.setObjectName("centralWidget")
++surface.resize(400, 300)
++apply_theme(surface)
++label = QLabel("White on white", surface)
++label.setGeometry(100, 120, 160, 40)
++label.setStyleSheet("background-color: #FFFFFF; color: #FFFFFF;")
++surface.show()
++app.processEvents()
++assert surface.grab().devicePixelRatio() == 2
++try:
++    assert_rendered_label_contrast(surface)
++except AssertionError as exc:
++    assert "1.00:1 on #ffffff" in str(exc), str(exc)
++else:
++    raise AssertionError("White on white was accepted at 200% scaling")
++surface.close()
++'''
++    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_SCALE_FACTOR="2")
++    completed = subprocess.run(
++        [sys.executable, "-c", script],
++        cwd=Path(__file__).resolve().parents[2],
++        env=environment,
++        capture_output=True,
++        text=True,
++        timeout=30,
++    )
++    assert completed.returncode == 0, completed.stdout + completed.stderr
+diff --git a/image_converter/ui/assets/check-mark.svg b/image_converter/ui/assets/check-mark.svg
+new file mode 100644
+--- /dev/null
++++ b/image_converter/ui/assets/check-mark.svg
+@@ -0,0 +1,3 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
++  <path d="m3 8 3.2 3.2L13 4.5" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
++</svg>
+diff --git a/image_converter/ui/assets/check-partial.svg b/image_converter/ui/assets/check-partial.svg
+new file mode 100644
+--- /dev/null
++++ b/image_converter/ui/assets/check-partial.svg
+@@ -0,0 +1,3 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
++  <path d="M4 8h8" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
++</svg>
+diff --git a/image_converter/ui/assets/radio-dot.svg b/image_converter/ui/assets/radio-dot.svg
+new file mode 100644
+--- /dev/null
++++ b/image_converter/ui/assets/radio-dot.svg
+@@ -0,0 +1,3 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
++  <circle cx="8" cy="8" r="3.5" fill="#FFFFFF"/>
++</svg>
+diff --git a/image_converter/ui/assets/chevron-up.svg b/image_converter/ui/assets/chevron-up.svg
+new file mode 100644
+--- /dev/null
++++ b/image_converter/ui/assets/chevron-up.svg
+@@ -0,0 +1,3 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
++  <path d="m4 10 4-4 4 4" fill="none" stroke="#DCE8F7" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"/>
++</svg>
+diff --git a/image_converter/ui/assets/chevron-up-disabled.svg b/image_converter/ui/assets/chevron-up-disabled.svg
+new file mode 100644
+--- /dev/null
++++ b/image_converter/ui/assets/chevron-up-disabled.svg
+@@ -0,0 +1,3 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
++  <path d="m4 10 4-4 4 4" fill="none" stroke="#8092A8" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"/>
++</svg>
+diff --git a/image_converter/ui/assets/chevron-down-disabled.svg b/image_converter/ui/assets/chevron-down-disabled.svg
+new file mode 100644
+--- /dev/null
++++ b/image_converter/ui/assets/chevron-down-disabled.svg
+@@ -0,0 +1,3 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
++  <path d="M4 6l4 4 4-4" fill="none" stroke="#8092A8" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"/>
++</svg>
+diff --git a/image_converter/ui/assets/spin-down.svg b/image_converter/ui/assets/spin-down.svg
+new file mode 100644
+--- /dev/null
++++ b/image_converter/ui/assets/spin-down.svg
+@@ -0,0 +1,3 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
++  <path d="M4 6l4 4 4-4" fill="none" stroke="#DCE8F7" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"/>
++</svg>

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from image_converter.core.engine import get_file_metadata
 from image_converter.ui.components import get_compatible_output_formats, format_bytes
+from image_converter.ui.metadata_evidence import MetadataEvidence
 from image_converter.ui.theme import (
     ACCENT,
     BORDER,
@@ -64,6 +65,8 @@ class QueueEntry:
     output_size: Optional[int] = None
     error: str = ""
     overridden: bool = False
+    output_path: Optional[Path] = None
+    metadata_evidence: Optional[MetadataEvidence] = None
 
     @property
     def display_size(self) -> str:
@@ -211,9 +214,14 @@ class QueueTableModel(QAbstractTableModel):
         if role == self.ProgressRole:
             return entry.progress
         if role == Qt.ItemDataRole.ToolTipRole:
+            details = [str(entry.path)]
             if entry.error:
-                return f"{entry.path}\n\n{entry.error}"
-            return str(entry.path)
+                details.append(entry.error)
+            if entry.output_path:
+                details.append(f"Output: {entry.output_path}")
+            if entry.metadata_evidence:
+                details.append(entry.metadata_evidence.output_text)
+            return "\n\n".join(details)
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if index.column() in (self.StatusColumn, self.PreviewColumn, self.TargetColumn, self.SizeColumn):
                 return Qt.AlignmentFlag.AlignCenter
@@ -377,6 +385,8 @@ class QueueTableModel(QAbstractTableModel):
             entry.progress = 0
             entry.output_size = None
             entry.error = ""
+            entry.output_path = None
+            entry.metadata_evidence = None
         if self.entries:
             self.dataChanged.emit(self.index(0, 0), self.index(len(self.entries) - 1, self.SizeColumn))
         self._emit_totals()

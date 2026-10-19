@@ -1,0 +1,2688 @@
+diff --git a/image_converter/ui/components.py b/image_converter/ui/components.py
+--- a/image_converter/ui/components.py
++++ b/image_converter/ui/components.py
+@@ -51,7 +51,8 @@
+     get_image_metadata,
+     get_supported_output_formats,
+ )
+-from image_converter.ui.theme import icon, repolish, set_variant
++from image_converter.ui.theme import FOCUS_RING, icon, repolish, set_variant
++from image_converter.ui.metadata_evidence import MetadataEvidence, inspect_metadata
+ 
+ 
+ def get_compatible_output_formats(file_path_or_ext: str | Path) -> List[str]:
+@@ -168,7 +169,7 @@
+         self.upload_icon = QLabel()
+         self.upload_icon.setPixmap(icon("upload").pixmap(52, 52))
+         self.upload_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+-        self.upload_icon.setAccessibleName("Upload files")
++        self.upload_icon.setAccessibleName("Add local files")
+ 
+         drop_kicker = QLabel("DROP ZONE")
+         drop_kicker.setObjectName("Eyebrow")
+@@ -350,6 +351,19 @@
+ 
+         layout.addWidget(self.info_frame)
+ 
++        self.lbl_output_metadata = QLabel()
++        self.lbl_output_metadata.setWordWrap(True)
++        self.lbl_output_metadata.setObjectName("MutedLabel")
++        self.lbl_output_metadata.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
++        self.lbl_output_metadata.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
++        self.lbl_output_metadata.setAccessibleName("Output metadata check")
++        self.lbl_output_metadata.setStyleSheet(
++            "QLabel { border: 2px solid transparent; padding: 4px; }"
++            f"QLabel:focus {{ border-color: {FOCUS_RING}; }}"
++        )
++        self.lbl_output_metadata.hide()
++        layout.addWidget(self.lbl_output_metadata)
++
+         # Quick action buttons for selected file
+         action_layout = QHBoxLayout()
+         action_layout.setSpacing(8)
+@@ -367,6 +381,8 @@
+         action_layout.addWidget(self.btn_open_location)
+         action_layout.addWidget(self.btn_copy_path)
+         layout.addLayout(action_layout)
++        self.setTabOrder(self.lbl_output_metadata, self.btn_open_location)
++        self.setTabOrder(self.btn_open_location, self.btn_copy_path)
+ 
+         layout.addStretch()
+ 
+@@ -393,29 +409,18 @@
+ 
+         p = Path(file_path)
+         self.current_file_path = p
++        self.set_output_evidence(None, None)
+         self.btn_open_location.setEnabled(True)
+         self.btn_copy_path.setEnabled(True)
+         ext = p.suffix.lower()
+         self.lbl_name.setText(p.name)
+         self.lbl_size.setText(format_bytes(p.stat().st_size) if p.exists() else "-")
+ 
+-        # Inspect metadata presence
+-        try:
+-            from image_converter.core.metadata_engine import get_detailed_metadata
+-            d_meta = get_detailed_metadata(p)
+-            if d_meta.get("has_metadata"):
+-                warn_str = f" ({d_meta['warnings'][0]})" if d_meta.get("warnings") else ""
+-                self.lbl_meta_privacy.setText(f"Has metadata{warn_str}")
+-                self.lbl_meta_privacy.setProperty("state", "warning")
+-            else:
+-                self.lbl_meta_privacy.setText("Clean (no tracking tags)")
+-                self.lbl_meta_privacy.setProperty("state", "success")
+-            repolish(self.lbl_meta_privacy)
+-        except Exception as meta_err:
+-            logger.debug(f"Could not load metadata privacy info for preview of {p.name}: {meta_err}")
+-            self.lbl_meta_privacy.setText("-")
+-            self.lbl_meta_privacy.setProperty("state", "")
+-            repolish(self.lbl_meta_privacy)
++        evidence = inspect_metadata(p)
++        self.lbl_meta_privacy.setText(evidence.summary)
++        self.lbl_meta_privacy.setToolTip(evidence.detail or "This check covers supported fields only.")
++        self.lbl_meta_privacy.setProperty("state", "warning" if evidence.status in {"found", "failed"} else "")
++        repolish(self.lbl_meta_privacy)
+ 
+         try:
+             meta = get_file_metadata(p)
+@@ -537,8 +542,21 @@
+             self.lbl_dim.setText("-")
+             self.lbl_format.setText(ext.lstrip(".").upper())
+ 
++    def set_output_evidence(self, output_path: Optional[Path], evidence: Optional[MetadataEvidence]):
++        self.lbl_output_metadata.setVisible(evidence is not None)
++        if evidence is not None:
++            detail = f"{evidence.output_text}\n{output_path}\nThis check covers supported fields only."
++            if evidence.fields:
++                detail += "\nFields found: " + ", ".join(evidence.fields)
++            if evidence.detail:
++                detail += "\n" + evidence.detail
++            self.lbl_output_metadata.setText(detail)
++        else:
++            self.lbl_output_metadata.clear()
++
+     def clear_preview(self):
+         self.current_file_path = None
++        self.set_output_evidence(None, None)
+         self.btn_open_location.setEnabled(False)
+         self.btn_copy_path.setEnabled(False)
+         self.preview_lbl.setPixmap(QPixmap())
+@@ -623,7 +641,7 @@
+         fmt_lbl.setObjectName("SectionTitle")
+         self.combo_format = QComboBox()
+         self.combo_format.setAccessibleName("Default output format")
+-        self.combo_format.setAccessibleDescription("Formats valid for every file in the queue.")
++        self.combo_format.setAccessibleDescription("Output choices for this queue. Availability depends on the conversion route and installed tools.")
+         self.combo_format.setMinimumHeight(36)
+         self.combo_format.currentTextChanged.connect(self._on_format_changed)
+         fmt_layout.addWidget(fmt_lbl)
+@@ -822,19 +840,20 @@
+         doc_tab_layout.addWidget(self.frame_sheet)
+ 
+         # OCR Group
+-        doc_sec_box = QGroupBox("Document OCR & Decryption")
++        doc_sec_box = QGroupBox("PDF text recognition and password")
+         doc_sec_layout = QVBoxLayout(doc_sec_box)
+         doc_sec_layout.setSpacing(8)
+ 
+-        self.chk_enable_ocr = QCheckBox("Enable OCR Text Fallback")
+-        self.chk_enable_ocr.setToolTip("Use OCR fallback when converting scanned PDFs or images to text/DOCX")
++        self.chk_enable_ocr = QCheckBox("Recognize scanned PDF text (OCR)")
++        self.chk_enable_ocr.setToolTip("Use OCR fallback for PDF to TXT or DOCX when text is missing. Image to TXT always uses OCR; image to DOCX embeds the image. OCR requires a local Tesseract installation.")
+         self.chk_enable_ocr.toggled.connect(self.settings_changed)
+         doc_sec_layout.addWidget(self.chk_enable_ocr)
+ 
+         pwd_layout = QHBoxLayout()
+         pwd_layout.addWidget(QLabel("Password:"))
+         self.line_password = QLineEdit()
+-        self.line_password.setPlaceholderText("Encrypted PDF / Word...")
++        self.line_password.setPlaceholderText("Password for supported PDF routes")
++        self.line_password.setToolTip("Used by supported PDF conversions and PDF metadata removal. Word conversion routes do not use this field.")
+         self.line_password.setEchoMode(QLineEdit.EchoMode.Password)
+         self.line_password.textChanged.connect(self.settings_changed)
+         pwd_layout.addWidget(self.line_password)
+@@ -850,19 +869,20 @@
+         priv_tab_layout.setContentsMargins(8, 12, 8, 8)
+         priv_tab_layout.setSpacing(10)
+ 
+-        meta_box = QGroupBox("Metadata Cleaning & Sanitization")
++        meta_box = QGroupBox("Metadata removal")
+         meta_layout = QVBoxLayout(meta_box)
+         meta_layout.setSpacing(8)
+ 
+-        self.chk_strip_metadata = QCheckBox("Strip all metadata from output")
++        self.chk_strip_metadata = QCheckBox("Remove supported metadata")
+         self.chk_strip_metadata.setToolTip(
+-            "Strip all personal identifiable information, author properties, "
+-            "camera/device tags, GPS coordinates, and timestamps across all formats."
++            "Request removal of supported metadata, such as author, GPS and timestamps, where the "
++            "format and conversion route allow. Review the output check after processing."
+         )
+         self.chk_strip_metadata.setChecked(False)
+         self.chk_strip_metadata.toggled.connect(self._on_strip_metadata_toggled)
+ 
+-        self.chk_preserve_exif = QCheckBox("Preserve EXIF Metadata (Images)")
++        self.chk_preserve_exif = QCheckBox("Keep supported EXIF metadata")
++        self.chk_preserve_exif.setToolTip("Keep EXIF where the image conversion route supports it. This does not preserve every metadata field.")
+         self.chk_preserve_exif.setChecked(True)
+         self.chk_preserve_exif.toggled.connect(self.settings_changed)
+ 
+@@ -876,7 +896,10 @@
+         priv_tab_layout.addWidget(meta_box)
+ 
+         lbl_priv_help = QLabel(
+-            "Privacy mode removes author information, revision history, device details, and GPS tags."
++            "Removal varies by format and conversion route. Some metadata may remain. "
++            "Some same-format routes apply metadata removal without quality or resize changes. "
++            "Document content and revision history are not comprehensively inspected. "
++            "Output checks report supported fields found after processing."
+         )
+         lbl_priv_help.setObjectName("MutedLabel")
+         lbl_priv_help.setWordWrap(True)
+@@ -981,15 +1004,16 @@
+             "JPG": "Compact and widely compatible. Best for photos without transparency.",
+             "JPEG": "Compact and widely compatible. Best for photos without transparency.",
+             "PNG": "Lossless image output with transparency support.",
+-            "WEBP": "Modern image output with excellent compression.",
++            "WEBP": "WebP image output. File size varies by content and quality.",
+             "PDF": "Portable document output for sharing, printing, and archiving.",
+-            "DOCX": "Editable Microsoft Word document output.",
++            "DOCX": "Word document output. Image inputs are embedded as pictures, without text recognition.",
+             "XLSX": "Editable Microsoft Excel workbook output.",
+             "CSV": "Simple tabular data for broad compatibility.",
+             "TXT": "Plain text output without formatting.",
+             "JSON": "Structured text output for software workflows.",
+             "HTML": "Web-ready document or tabular output.",
+             "STRIP_METADATA": "Keep the file format while removing supported metadata.",
++            "PPTX": "PowerPoint output. Some advertised input routes are unavailable and may report unsupported.",
+             "PER_FILE": "This mixed queue has no single common output. Each row keeps its compatible target.",
+         }
+         self.lbl_format_summary.setText(
+diff --git a/image_converter/ui/main_window.py b/image_converter/ui/main_window.py
+--- a/image_converter/ui/main_window.py
++++ b/image_converter/ui/main_window.py
+@@ -51,6 +51,7 @@
+     SplitDialog,
+ )
+ from image_converter.ui.worker import BatchConversionWorker
++from image_converter.ui.metadata_evidence import MetadataEvidence, metadata_check_summary
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -230,6 +231,7 @@
+         self.privacy_badge.setObjectName("PrivacyBadge")
+         self.privacy_badge.setCursor(Qt.CursorShape.ArrowCursor)
+         self.privacy_badge.setAccessibleDescription("All file processing happens locally.")
++        self.privacy_badge.setToolTip("Files are processed on this device. The desktop conversion tools do not upload your files.")
+         layout.addWidget(self.btn_add_files)
+         layout.addWidget(self.btn_add_folder)
+         layout.addWidget(self.privacy_badge)
+@@ -387,13 +389,20 @@
+         copy.setSpacing(2)
+         self.lbl_status = QLabel("0 files · 0 B → —")
+         self.lbl_status.setObjectName("StatusLabel")
+-        self.lbl_status_hint = QLabel("Your originals are never overwritten.")
++        self.lbl_status_hint = QLabel("Output: same folder as each source. Existing destination files may be replaced.")
+         self.lbl_status_hint.setObjectName("MutedLabel")
++        self.lbl_status_hint.setWordWrap(True)
++        self.lbl_metadata_result = QLabel()
++        self.lbl_metadata_result.setObjectName("MutedLabel")
++        self.lbl_metadata_result.setWordWrap(True)
++        self.lbl_metadata_result.setAccessibleName("Output metadata summary")
++        self.lbl_metadata_result.hide()
+         self.progress_bar = QProgressBar()
+         self.progress_bar.setTextVisible(False)
+         self.progress_bar.hide()
+         copy.addWidget(self.lbl_status)
+         copy.addWidget(self.lbl_status_hint)
++        copy.addWidget(self.lbl_metadata_result)
+         copy.addWidget(self.progress_bar)
+         layout.addLayout(copy, stretch=1)
+ 
+@@ -525,6 +534,9 @@
+ 
+     def _on_table_row_selected(self, file_path: str):
+         self.preview_widget.set_image(file_path)
++        entry = next((item for item in self.queue_table.queue_model.entries if item.path == Path(file_path)), None)
++        if entry:
++            self.preview_widget.set_output_evidence(entry.output_path, entry.metadata_evidence)
+         self.inspector_stack.setCurrentIndex(1)
+         self.btn_remove_item.setEnabled(not self._is_converting)
+ 
+@@ -564,12 +576,18 @@
+         estimate = f"~{format_bytes(estimated_total)}" if estimated_total is not None else "—"
+         if background_busy and not self._is_converting:
+             self.lbl_status.setText("Background removal is running")
+-            self.lbl_status_hint.setText("One processing job runs at a time to reduce resource use.")
++            self.lbl_status_hint.setText("Conversion waits until background removal finishes.")
+         elif update_status and self._footer_state == "ready" and not self._is_converting:
+             self.lbl_status.setText(
+                 f"{total} file{'s' if total != 1 else ''} · {format_bytes(input_total)} → {estimate}"
+             )
+-            self.lbl_status_hint.setText("Your originals are never overwritten.")
++            output_dir = self.settings_widget.get_output_directory()
++            destination = str(output_dir) if output_dir else "same folder as each source"
++            self.lbl_status_hint.setText(f"Output: {destination}. Existing destination files may be replaced.")
++
++        evidence = [entry.metadata_evidence for entry in model.entries if entry.metadata_evidence is not None]
++        self.lbl_metadata_result.setText(metadata_check_summary(evidence))
++        self.lbl_metadata_result.setVisible(bool(evidence))
+ 
+         if hasattr(self.settings_widget, "set_queue_context"):
+             compatible_formats = model.compatible_format_intersection()
+@@ -607,7 +625,7 @@
+         self.undo_toast.hide()
+         self._refresh_queue_ui()
+         if not added and file_paths:
+-            self.lbl_status_hint.setText("Those files are already in the queue or are unsupported.")
++            self.lbl_status_hint.setText("No new files were added. Check the selected paths and queue for duplicates.")
+ 
+     add_files = add_images
+ 
+@@ -749,6 +767,10 @@
+             model.update_status(row, "Queued", progress=0)
+             model.entry(row).output_size = None
+             model.entry(row).error = ""
++            model.entry(row).output_path = None
++            model.entry(row).metadata_evidence = None
++            if self.preview_widget.current_file_path == model.entry(row).path:
++                self.preview_widget.set_output_evidence(None, None)
+         model.update_status(rows[0], "Converting", progress=0)
+ 
+         self._is_converting = True
+@@ -762,11 +784,13 @@
+         self.btn_convert_all.setText("Cancel conversion")
+         set_variant(self.btn_convert_all, "danger")
+         self.lbl_status.setText(f"Converting 0 of {len(tasks)} files")
+-        self.lbl_status_hint.setText("Cancel stops after the current file finishes.")
++        self.lbl_status_hint.setText("Cancellation skips work that has not started. Running files finish first.")
++        self.lbl_metadata_result.hide()
+ 
+         self.worker = BatchConversionWorker(tasks, self.engine)
+         self.worker.file_started.connect(self._on_file_started)
+         self.worker.file_completed.connect(self._on_file_completed)
++        self.worker.metadata_inspected.connect(self._on_metadata_inspected)
+         self.worker.progress_updated.connect(self._on_progress_updated)
+         self.worker.batch_finished.connect(self._on_batch_finished)
+         self.worker.batch_cancelled.connect(self._on_batch_cancelled)
+@@ -788,6 +812,9 @@
+         row = self._active_rows[worker_index]
+         model = self.queue_table.queue_model
+         if result.success:
++            entry = model.entry(row)
++            if entry:
++                entry.output_path = Path(result.output_path) if result.output_path else None
+             model.update_status(
+                 row,
+                 "Warning" if result.error_message else "Done",
+@@ -802,6 +829,20 @@
+                 progress=0,
+                 error=result.error_message or "Conversion failed. Review the file and retry.",
+             )
++
++    def _on_metadata_inspected(self, worker_index: int, evidence: MetadataEvidence):
++        if not (0 <= worker_index < len(self._active_rows)):
++            return
++        row = self._active_rows[worker_index]
++        entry = self.queue_table.queue_model.entry(row)
++        if entry is None:
++            return
++        entry.metadata_evidence = evidence
++        if self.preview_widget.current_file_path == entry.path:
++            self.preview_widget.set_output_evidence(entry.output_path, evidence)
++        results = [item.metadata_evidence for item in self.queue_table.queue_model.entries if item.metadata_evidence is not None]
++        self.lbl_metadata_result.setText(metadata_check_summary(results))
++        self.lbl_metadata_result.setVisible(bool(results))
+ 
+     def _on_progress_updated(self, current: int, total: int, percentage: int):
+         self.progress_bar.setValue(percentage)
+@@ -834,7 +875,7 @@
+         self.lbl_status_hint.setText(
+             "Select a failed status to retry."
+             if fail_count
+-            else f"Completed in {elapsed_sec:.2f}s. Your originals were not changed."
++            else f"Completed in {elapsed_sec:.2f}s. Select a row to review its output metadata check."
+         )
+         self._refresh_queue_ui(update_status=False)
+ 
+@@ -862,7 +903,7 @@
+             self.worker.cancel()
+             self.btn_convert_all.setEnabled(False)
+             self.btn_convert_all.setText("Cancelling…")
+-            self.lbl_status.setText("Cancelling after the current file…")
++            self.lbl_status.setText("Cancelling after running files finish…")
+ 
+     def _convert_more(self):
+         self._footer_state = "ready"
+diff --git a/image_converter/ui/worker.py b/image_converter/ui/worker.py
+--- a/image_converter/ui/worker.py
++++ b/image_converter/ui/worker.py
+@@ -14,6 +14,7 @@
+     ConversionResult,
+     ImageConverterEngine,
+ )
++from image_converter.ui.metadata_evidence import inspect_metadata
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -24,6 +25,7 @@
+     # Signals
+     file_started = Signal(int, str)  # (index, filename)
+     file_completed = Signal(int, object)  # (index, ConversionResult)
++    metadata_inspected = Signal(int, object)  # (index, presentation-only evidence)
+     progress_updated = Signal(int, int, int)  # (current, total, percentage)
+     batch_finished = Signal(int, int, float, int, int)  # (success, failed, elapsed_sec, bytes_in, bytes_out)
+     batch_cancelled = Signal()
+@@ -76,6 +78,15 @@
+ 
+             pct = int((completed_count / total_count) * 100) if total_count > 0 else 100
+             self.file_completed.emit(task_idx, res)
++            if res.success:
++                config = self.tasks[task_idx][2]
++                image_targets = {"PNG", "JPG", "JPEG", "WEBP", "BMP", "TIFF"}
++                partial = (
++                    Path(res.input_path).suffix.lower() in {".pdf", ".doc", ".docx", ".pptx"}
++                    and config.target_format.upper() in image_targets
++                )
++                evidence = inspect_metadata(res.output_path, password=config.password, partial=partial)
++                self.metadata_inspected.emit(task_idx, evidence)
+             self.progress_updated.emit(completed_count, total_count, pct)
+ 
+         try:
+diff --git a/image_converter/ui/queue_model.py b/image_converter/ui/queue_model.py
+--- a/image_converter/ui/queue_model.py
++++ b/image_converter/ui/queue_model.py
+@@ -35,6 +35,7 @@
+ 
+ from image_converter.core.engine import get_file_metadata
+ from image_converter.ui.components import get_compatible_output_formats, format_bytes
++from image_converter.ui.metadata_evidence import MetadataEvidence
+ from image_converter.ui.theme import (
+     ACCENT,
+     BORDER,
+@@ -64,6 +65,8 @@
+     output_size: Optional[int] = None
+     error: str = ""
+     overridden: bool = False
++    output_path: Optional[Path] = None
++    metadata_evidence: Optional[MetadataEvidence] = None
+ 
+     @property
+     def display_size(self) -> str:
+@@ -211,9 +214,14 @@
+         if role == self.ProgressRole:
+             return entry.progress
+         if role == Qt.ItemDataRole.ToolTipRole:
++            details = [str(entry.path)]
+             if entry.error:
+-                return f"{entry.path}\n\n{entry.error}"
+-            return str(entry.path)
++                details.append(entry.error)
++            if entry.output_path:
++                details.append(f"Output: {entry.output_path}")
++            if entry.metadata_evidence:
++                details.append(entry.metadata_evidence.output_text)
++            return "\n\n".join(details)
+         if role == Qt.ItemDataRole.TextAlignmentRole:
+             if index.column() in (self.StatusColumn, self.PreviewColumn, self.TargetColumn, self.SizeColumn):
+                 return Qt.AlignmentFlag.AlignCenter
+@@ -377,6 +385,8 @@
+             entry.progress = 0
+             entry.output_size = None
+             entry.error = ""
++            entry.output_path = None
++            entry.metadata_evidence = None
+         if self.entries:
+             self.dataChanged.emit(self.index(0, 0), self.index(len(self.entries) - 1, self.SizeColumn))
+         self._emit_totals()
+diff --git a/image_converter/ui/pdf_tools_page.py b/image_converter/ui/pdf_tools_page.py
+--- a/image_converter/ui/pdf_tools_page.py
++++ b/image_converter/ui/pdf_tools_page.py
+@@ -28,7 +28,7 @@
+             "Merge",
+             "Combine files into one PDF",
+             "Arrange PDFs and images in the exact order you want, then export a single document.",
+-            ("PDF and image inputs", "Drag-friendly ordering", "One combined output"),
++            ("PDF and image inputs", "Move files up or down", "One combined output"),
+             "Open merge workspace",
+             "merge_requested",
+         ),
+@@ -44,15 +44,15 @@
+             "Organize",
+             "Rebuild page order visually",
+             "Preview pages, move them, rotate them, duplicate them, or remove them before saving.",
+-            ("Page thumbnails", "Reorder and rotate", "Non-destructive save"),
++            ("Page thumbnails", "Reorder and rotate", "Choose an output PDF"),
+             "Open page organizer",
+             "organize_requested",
+         ),
+         (
+             "Compress",
+-            "Reduce PDF file size",
+-            "Choose a balanced, maximum, or lossless profile and see the achieved reduction.",
+-            ("Three compression profiles", "Original stays untouched", "Clear savings report"),
++            "Try a smaller PDF",
++            "Choose a compression profile and see the measured result. Savings vary by PDF.",
++            ("Three compression profiles", "Choose an output PDF", "Measured savings report"),
+             "Open compression workspace",
+             "compress_requested",
+         ),
+@@ -69,7 +69,7 @@
+         set_eyebrow(eyebrow)
+         title = QLabel("PDF tools")
+         title.setObjectName("AppTitle")
+-        subtitle = QLabel("Choose a focused workflow. Your existing PDF engine and output behavior stay unchanged.")
++        subtitle = QLabel("Merge, split, organize or compress PDFs on this device.")
+         subtitle.setObjectName("MutedLabel")
+         subtitle.setWordWrap(True)
+         layout.addWidget(eyebrow)
+diff --git a/image_converter/ui/image_tools_page.py b/image_converter/ui/image_tools_page.py
+--- a/image_converter/ui/image_tools_page.py
++++ b/image_converter/ui/image_tools_page.py
+@@ -50,10 +50,11 @@
+ 
+         label = QLabel("COMPRESS")
+         set_eyebrow(label)
+-        heading = QLabel("Reduce image file size")
++        heading = QLabel("Try smaller image copies")
+         heading.setObjectName("SectionTitleLarge")
+         body = QLabel(
+-            "Create smaller image copies with WebP, JPEG, PNG optimization, optional resizing, and metadata removal."
++            "Choose WebP, JPEG or PNG output with quality, resize and supported metadata controls. "
++            "Savings and applied settings vary by image and conversion route."
+         )
+         body.setObjectName("MutedLabel")
+         body.setWordWrap(True)
+@@ -62,7 +63,7 @@
+         section_layout.addWidget(body)
+         section_layout.addSpacing(8)
+ 
+-        for bullet in ("Batch image inputs", "Quality and max-size controls", "Originals stay untouched"):
++        for bullet in ("Batch image inputs", "Quality and max-size controls", "Numbered output names when a file exists"):
+             row = QLabel(f"-  {bullet}")
+             row.setAccessibleName(bullet)
+             section_layout.addWidget(row)
+diff --git a/image_converter/ui/tool_dialogs.py b/image_converter/ui/tool_dialogs.py
+--- a/image_converter/ui/tool_dialogs.py
++++ b/image_converter/ui/tool_dialogs.py
+@@ -60,7 +60,8 @@
+     split_pdf,
+ )
+ from image_converter.ui.components import format_bytes
+-from image_converter.ui.theme import apply_dialog_theme, icon, repolish, set_variant
++from image_converter.ui.theme import FOCUS_RING, apply_dialog_theme, icon, repolish, set_variant
++from image_converter.ui.metadata_evidence import inspect_metadata
+ 
+ 
+ def fitz_page_to_qpixmap(page: fitz.Page, dpi: int = 72) -> QPixmap:
+@@ -703,8 +704,9 @@
+ 
+         header = QLabel("Compress Images")
+         header.setObjectName("HeaderLabel")
+-        sub = QLabel("Create smaller image copies while keeping the originals unchanged.")
++        sub = QLabel("Try smaller image copies. Savings and applied settings vary by image and conversion route.")
+         sub.setObjectName("MutedLabel")
++        sub.setWordWrap(True)
+         layout.addWidget(header)
+         layout.addWidget(sub)
+ 
+@@ -778,7 +780,8 @@
+         resize_row.addStretch()
+         options_layout.addLayout(resize_row)
+ 
+-        self.chk_strip_metadata = QCheckBox("Strip metadata from compressed copies")
++        self.chk_strip_metadata = QCheckBox("Remove supported metadata")
++        self.chk_strip_metadata.setToolTip("Supported fields vary by format. Some same-format routes apply metadata removal without quality or resize changes. If the original is copied because compression made the file larger, its metadata and dimensions remain. Review the output check after processing.")
+         self.chk_strip_metadata.setChecked(True)
+         options_layout.addWidget(self.chk_strip_metadata)
+ 
+@@ -893,6 +896,8 @@
+         input_total = 0
+         output_total = 0
+         last_output_dir: Optional[Path] = None
++        output_checks: List[str] = []
++        unchanged_copies = 0
+ 
+         for source in self.files:
+             try:
+@@ -920,6 +925,10 @@
+                 if same_format and output_size > source_size:
+                     shutil.copy2(source, destination)
+                     output_size = destination.stat().st_size
++                    unchanged_copies += 1
++
++                evidence = inspect_metadata(destination)
++                output_checks.append(f"{destination.name}: {evidence.output_text}")
+ 
+                 successes += 1
+                 input_total += source_size
+@@ -929,14 +938,35 @@
+                 failures.append(f"{source.name}: {exc}")
+ 
+         if successes:
+-            saved = max(0, input_total - output_total)
+-            pct = (saved / input_total * 100.0) if input_total else 0.0
++            saved = input_total - output_total
++            pct = (abs(saved) / input_total * 100.0) if input_total else 0.0
++            change = f"{pct:.1f}% smaller" if saved >= 0 else f"{pct:.1f}% larger"
+             msg = (
+-                f"{successes} compressed · {format_bytes(input_total)} -> "
+-                f"{format_bytes(output_total)} ({pct:.1f}% saved)"
++                f"{successes} output{'s' if successes != 1 else ''} saved · {format_bytes(input_total)} -> "
++                f"{format_bytes(output_total)} ({change})"
+             )
++            if unchanged_copies:
++                msg += (
++                    f"\n{unchanged_copies} unchanged cop{'y' if unchanged_copies == 1 else 'ies'} saved because "
++                    "compression produced larger files. Original metadata and dimensions may remain."
++                )
++            self.output_checks = output_checks
++            msg += "\n" + "\n".join(output_checks[:5])
++            if len(output_checks) > 5:
++                msg += f"\n{len(output_checks) - 5} additional output checks are not shown here."
++            msg += "\nMetadata checks cover supported fields only."
+             self.lbl_result.setText(f"Complete: {msg}")
+-            self.lbl_result.setProperty("state", "success" if not failures else "warning")
++            self.lbl_result.setWordWrap(True)
++            self.lbl_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
++            self.lbl_result.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
++            self.lbl_result.setAccessibleName("Image compression result")
++            self.lbl_result.setStyleSheet(
++                "QLabel { border: 2px solid transparent; padding: 4px; }"
++                f"QLabel:focus {{ border-color: {FOCUS_RING}; }}"
++            )
++            self.setTabOrder(self.btn_compress, self.lbl_result)
++            self.setTabOrder(self.lbl_result, self.btn_cancel)
++            self.lbl_result.setProperty("state", "warning" if failures or unchanged_copies or saved < 0 else "success")
+             repolish(self.lbl_result)
+             detail = msg
+             if failures:
+@@ -983,7 +1013,7 @@
+         # Header
+         header = QLabel("Compress PDF File")
+         header.setObjectName("HeaderLabel")
+-        sub = QLabel("Reduce file size using image resampling and stream deflation.")
++        sub = QLabel("Try a smaller PDF. Savings and visible changes depend on its content.")
+         sub.setObjectName("MutedLabel")
+         layout.addWidget(header)
+         layout.addWidget(sub)
+@@ -1009,12 +1039,15 @@
+         opt_layout = QVBoxLayout(opt_group)
+         opt_layout.setSpacing(10)
+ 
+-        self.rb_balanced = QRadioButton("Balanced (Recommended) — 150 DPI, 75% quality, stream deflation")
++        self.rb_balanced = QRadioButton("Balanced (recommended): reduce image size and quality")
++        self.rb_balanced.setToolTip("Images may be resized to a maximum dimension of 1200 pixels and encoded as JPEG at quality 65. Visible changes are possible.")
+         self.rb_balanced.setChecked(True)
+ 
+-        self.rb_max = QRadioButton("Maximum Compression — 100 DPI, 55% quality, smallest file size")
+-
+-        self.rb_lossless = QRadioButton("Lossless — Deflate streams and remove xrefs without altering images")
++        self.rb_max = QRadioButton("Stronger compression: more visible changes possible")
++        self.rb_max.setToolTip("Images may be resized to a maximum dimension of 800 pixels and encoded as JPEG at quality 40. Transparency may be removed; a smaller result is not guaranteed.")
++
++        self.rb_lossless = QRadioButton("Keep image quality: try document compression")
++        self.rb_lossless.setToolTip("Compress document data and subset fonts without re-encoding page images. A smaller result is not guaranteed.")
+ 
+         self.btn_group = QButtonGroup(self)
+         self.btn_group.addButton(self.rb_balanced)
+@@ -1081,7 +1114,7 @@
+             pct = stats["savings_percent"]
+ 
+             if stats.get("path_taken") == "fallback-copy" or stats.get("saved_bytes", 0) <= 0:
+-                msg = f"No reduction was achieved (original was already optimal at {orig_s}). Original file preserved."
++                msg = f"No reduction was achieved with this profile ({orig_s}). An unchanged copy was saved."
+                 self.lbl_result.setText(f"Note: {msg}")
+                 self.lbl_result.setProperty("state", "warning")
+                 repolish(self.lbl_result)
+diff --git a/image_converter/ui/metadata_evidence.py b/image_converter/ui/metadata_evidence.py
+new file mode 100644
+--- /dev/null
++++ b/image_converter/ui/metadata_evidence.py
+@@ -0,0 +1,102 @@
++"""Presentation-only evidence for the metadata fields the existing inspector reads."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++from threading import RLock
++import warnings
++import xml.etree.ElementTree as ET
++import zipfile
++
++from image_converter.core.metadata import engine as metadata_engine
++
++_INSPECTION_WARNING_LOCK = RLock()
++
++
++@dataclass(frozen=True)
++class MetadataEvidence:
++    status: str
++    fields: tuple[str, ...] = ()
++    detail: str = ""
++    partial: bool = False
++
++    @property
++    def summary(self) -> str:
++        if self.status == "found":
++            count = len(self.fields)
++            return f"{count} supported metadata field{'s' if count != 1 else ''} found"
++        if self.status == "not_found":
++            return "No supported metadata found"
++        if self.status == "failed":
++            return "Metadata could not be inspected"
++        return "Metadata inspection unavailable"
++
++    @property
++    def output_text(self) -> str:
++        text = f"Output check: {self.summary}."
++        if self.partial:
++            text += " Only the first output file was checked."
++        return text
++
++
++def inspect_metadata(path: str | Path, password: str | None = None, *, partial: bool = False) -> MetadataEvidence:
++    """Do not interpret an unsupported or failed inspection as a clean result."""
++    file_path = Path(path)
++    extension = file_path.suffix.lower()
++    supported = {
++        ".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".heic", ".heif", ".bmp", ".pdf", ".odt",
++    }
++    optional = {
++        ".docx": metadata_engine._DOCX_AVAILABLE,
++        ".pptx": metadata_engine._PPTX_AVAILABLE,
++        ".xlsx": metadata_engine._OPENPYXL_AVAILABLE,
++        ".xlsm": metadata_engine._OPENPYXL_AVAILABLE,
++    }
++    if extension not in supported and not optional.get(extension, False):
++        return MetadataEvidence("unavailable", detail="This format or its metadata reader is unavailable.", partial=partial)
++    try:
++        if extension == ".odt":
++            # The existing reader logs XML parse errors without returning a warning.
++            with zipfile.ZipFile(file_path) as archive:
++                if "meta.xml" in archive.namelist():
++                    # Match the existing reader's decoding, including its limits.
++                    ET.fromstring(archive.read("meta.xml").decode("utf-8", errors="replace"))
++        if extension == ".pdf":
++            with metadata_engine.fitz.open(str(file_path)) as document:
++                if document.needs_pass and not (password and document.authenticate(password)):
++                    return MetadataEvidence("unavailable", detail="A valid PDF password is required for inspection.", partial=partial)
++        # Warning contexts are global on some Python builds. Inspector and worker
++        # checks must not restore or consume each other's warning filters.
++        with _INSPECTION_WARNING_LOCK:
++            with warnings.catch_warnings(record=True) as reader_warnings:
++                warnings.simplefilter("always")
++                metadata = metadata_engine.get_detailed_metadata(file_path, password=password)
++        parse_warnings = [
++            str(warning.message) for warning in reader_warnings
++            if any(term in str(warning.message).lower() for term in ("corrupt", "truncat", "invalid", "malformed", "parse", "exif"))
++        ]
++        if parse_warnings:
++            return MetadataEvidence("failed", detail="\n".join(parse_warnings), partial=partial)
++        inspection_warnings = tuple(str(warning) for warning in metadata.get("warnings", ()))
++        if any("inspection failed" in warning.lower() for warning in inspection_warnings):
++            return MetadataEvidence("failed", detail="\n".join(inspection_warnings), partial=partial)
++        fields = tuple(str(field) for field in metadata.get("fields", {}))
++        if metadata.get("has_metadata") and not fields:
++            return MetadataEvidence("failed", detail="The metadata reader did not return field evidence.", partial=partial)
++        return MetadataEvidence("found" if fields else "not_found", fields, "\n".join(inspection_warnings), partial)
++    except Exception as error:
++        return MetadataEvidence("failed", detail=str(error), partial=partial)
++
++
++def metadata_check_summary(evidence: list[MetadataEvidence]) -> str:
++    if not evidence:
++        return ""
++    found = sum(item.status == "found" for item in evidence)
++    absent = sum(item.status == "not_found" for item in evidence)
++    unknown = len(evidence) - found - absent
++    return (
++        f"Output metadata checks: {absent} with no supported fields found; "
++        f"{found} with supported fields; {unknown} unavailable or failed. "
++        "Select a row for details."
++    )
+diff --git a/image_converter/ui/background_removal_page.py b/image_converter/ui/background_removal_page.py
+--- a/image_converter/ui/background_removal_page.py
++++ b/image_converter/ui/background_removal_page.py
+@@ -170,7 +170,7 @@
+         set_eyebrow(eyebrow)
+         title = QLabel("Background removal")
+         title.setObjectName("AppTitle")
+-        subtitle = QLabel("Create clean cutouts locally. Drop JPEG, PNG, WebP, BMP, or TIFF images here.")
++        subtitle = QLabel("Create cutouts locally. Drop JPEG, PNG, WebP, BMP, or TIFF images here.")
+         subtitle.setObjectName("MutedLabel")
+         subtitle.setWordWrap(True)
+         layout.addWidget(eyebrow)
+diff --git a/image_converter/ui/dev_capture_states.py b/image_converter/ui/dev_capture_states.py
+--- a/image_converter/ui/dev_capture_states.py
++++ b/image_converter/ui/dev_capture_states.py
+@@ -23,7 +23,7 @@
+ from PySide6.QtCore import QThreadPool, Qt
+ from PySide6.QtGui import QFontDatabase
+ from PySide6.QtWidgets import (
+-    QApplication, QCheckBox, QDialog, QGridLayout, QLabel, QSpinBox,
++    QApplication, QCheckBox, QDialog, QGridLayout, QLabel, QMessageBox, QSpinBox,
+ )
+ 
+ from image_converter.ui.main_window import ImageConverterMainWindow
+@@ -134,7 +134,7 @@
+     window.progress_bar.setValue(36)
+     window.progress_bar.show()
+     window.lbl_status.setText(f"Converting 1 of {model.rowCount()} files · 36%")
+-    window.lbl_status_hint.setText("Cancel stops after the current file finishes.")
++    window.lbl_status_hint.setText("Cancellation skips work that has not started. Running files finish first.")
+     window._refresh_queue_ui(update_status=False)
+     capture("05-converting")
+ 
+@@ -153,7 +153,14 @@
+     if any(entry.status not in ("Done", "Warning") for entry in model.entries):
+         raise RuntimeError("A sample conversion failed; completed captures must use real outputs")
+     capture("06-completed")
+-
++    window.queue_table.selectRow(0)
++    capture("06-output-check")
++    window._show_batch_settings()
++
++    failed_entry = model.entry(0)
++    failed_entry.output_size = None
++    failed_entry.output_path = None
++    failed_entry.metadata_evidence = None
+     model.update_status(0, "Failed", progress=0, error="The sample file could not be decoded.")
+     window._footer_state = "partial_failure"
+     window.btn_open_folder.setVisible(model.rowCount() > 1)
+@@ -179,14 +186,56 @@
+     QThreadPool.globalInstance().waitForDone(3000)
+     app.processEvents()
+     captured.extend(capture_dialogs(output_dir, samples, width, height))
++    captured.append(capture_image_compression_result(output_dir, samples[0], width, height))
+     (output_dir / "manifest.json").write_text(json.dumps({
+         "logical_size": [width, height],
+         "platform": app.platformName(),
++        "device_pixel_ratio": window.devicePixelRatioF(),
+         "captures": [path.name for path in captured],
+         "fixtures": "Running and failure queue states are layout fixtures. Completed sizes come from a real sample batch.",
+         "native_windows_dpi_or_assistive_technology_verified": False,
+     }, indent=2), encoding="utf-8")
+     return captured
++
++
++def capture_image_compression_result(output_dir: Path, image_path: Path, width: int, height: int) -> Path:
++    """Exercise the real original-copy fallback and capture its evidence before closing."""
++    source = output_dir / "samples" / "already-small.jpg"
++    exif = Image.Exif()
++    exif[315] = "Sample author"
++    with Image.open(image_path) as image:
++        image.convert("RGB").save(source, quality=5, optimize=True, exif=exif)
++    dialog = ImageCompressDialog(initial_files=[source])
++    dialog.resize(width, height)
++    dialog.combo_format.setCurrentText("Keep original format")
++    dialog.txt_output_dir.setText(str(output_dir / "compression-outputs"))
++    dialog.show()
++    destination = output_dir / "14-image-compression-unchanged-copy.png"
++    original_information = QMessageBox.information
++    original_critical = QMessageBox.critical
++
++    def save_result(*_args, **_kwargs):
++        _settle(QApplication.instance())
++        if "unchanged" not in dialog.lbl_result.text().lower():
++            raise RuntimeError("Compression fixture did not exercise the original-copy fallback")
++        if not dialog.grab().save(str(destination)):
++            raise RuntimeError(f"Could not save {destination}")
++        return QMessageBox.StandardButton.Ok
++
++    def fail_result(_parent, title, detail, *_args, **_kwargs):
++        raise RuntimeError(f"{title}: {detail}")
++
++    try:
++        QMessageBox.information = save_result
++        QMessageBox.critical = fail_result
++        dialog._execute_compress()
++    finally:
++        QMessageBox.information = original_information
++        QMessageBox.critical = original_critical
++        dialog.close()
++    if not destination.exists():
++        raise RuntimeError("Compression result was not captured")
++    return destination
+ 
+ 
+ def capture_dialogs(output_dir: Path, samples: list[Path], width: int, height: int) -> list[Path]:
+diff --git a/image_converter/tests/test_truthful_copy.py b/image_converter/tests/test_truthful_copy.py
+new file mode 100644
+--- /dev/null
++++ b/image_converter/tests/test_truthful_copy.py
+@@ -0,0 +1,346 @@
++"""Truthful metadata states and measured results without changing engine behavior."""
++
++from __future__ import annotations
++
++import os
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++from types import SimpleNamespace
++import zipfile
++
++os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
++
++import fitz
++from PIL import Image
++import pytest
++from PySide6.QtCore import Qt
++from PySide6.QtWidgets import QApplication, QAbstractButton, QLabel, QMessageBox
++
++from image_converter.core.engine import ConversionConfig, ConversionResult
++from image_converter.ui import metadata_evidence
++from image_converter.ui.components import ConversionSettingsWidget, ImagePreviewWidget
++from image_converter.ui.image_tools_page import ImageToolsPage
++from image_converter.ui.main_window import ImageConverterMainWindow
++from image_converter.ui.metadata_evidence import MetadataEvidence, inspect_metadata, metadata_check_summary
++from image_converter.ui.pdf_tools_page import PdfToolsPage
++from image_converter.ui.tool_dialogs import CompressDialog, ImageCompressDialog
++from image_converter.ui.worker import BatchConversionWorker
++
++
++@pytest.fixture(scope="module")
++def qapp():
++    return QApplication.instance() or QApplication([])
++
++
++def photo(path: Path, *, with_metadata: bool = False) -> Path:
++    exif = Image.Exif()
++    if with_metadata:
++        exif[315] = "Private author"
++    Image.new("RGB", (20, 15), "red").save(path, exif=exif)
++    return path
++
++
++def test_real_supported_metadata_is_distinct_from_no_supported_fields(tmp_path):
++    original = photo(tmp_path / "original.jpg", with_metadata=True)
++    empty = photo(tmp_path / "empty.jpg")
++    assert inspect_metadata(original).status == "found"
++    assert "Artist" in inspect_metadata(original).fields
++    assert inspect_metadata(empty).summary == "No supported metadata found"
++    assert "clean" not in inspect_metadata(empty).summary.lower()
++
++
++@pytest.mark.parametrize("extension", [".txt", ".csv", ".gif", ".ico", ".xls"])
++def test_unsupported_inspection_never_reports_clean(extension, tmp_path):
++    path = tmp_path / f"uninspected{extension}"
++    path.write_bytes(b"not a supported metadata route")
++    evidence = inspect_metadata(path)
++    assert evidence.status == "unavailable"
++    assert evidence.summary == "Metadata inspection unavailable"
++
++
++@pytest.mark.parametrize("extension,flag", [(".docx", "_DOCX_AVAILABLE"), (".pptx", "_PPTX_AVAILABLE"), (".xlsx", "_OPENPYXL_AVAILABLE")])
++def test_missing_reader_is_unknown_not_no_metadata(extension, flag, tmp_path, monkeypatch):
++    monkeypatch.setattr(metadata_evidence.metadata_engine, flag, False)
++    path = tmp_path / f"missing-reader{extension}"
++    path.write_bytes(b"placeholder")
++    assert inspect_metadata(path).status == "unavailable"
++
++
++def test_internal_inspection_failure_is_not_clean(tmp_path, monkeypatch):
++    path = photo(tmp_path / "image.jpg")
++    monkeypatch.setattr(metadata_evidence.metadata_engine, "get_detailed_metadata", lambda *_args, **_kwargs: {
++        "has_metadata": False, "fields": {}, "warnings": ["Image metadata inspection failed: unavailable reader"],
++    })
++    evidence = inspect_metadata(path)
++    assert evidence.status == "failed"
++    assert "unavailable reader" in evidence.detail
++
++
++def test_informational_gps_warning_still_reports_found_fields(tmp_path, monkeypatch):
++    path = photo(tmp_path / "gps.jpg")
++    monkeypatch.setattr(metadata_evidence.metadata_engine, "get_detailed_metadata", lambda *_args, **_kwargs: {
++        "has_metadata": True, "fields": {"GPSInfo": "coordinates"}, "warnings": ["Contains embedded GPS location data"],
++    })
++    evidence = inspect_metadata(path)
++    assert evidence.status == "found"
++    assert evidence.summary == "1 supported metadata field found"
++
++
++def test_exception_is_failed_evidence(tmp_path, monkeypatch):
++    path = photo(tmp_path / "image.jpg")
++
++    def fail(*_args, **_kwargs):
++        raise OSError("Reader failed")
++
++    monkeypatch.setattr(metadata_evidence.metadata_engine, "get_detailed_metadata", fail)
++    assert inspect_metadata(path).status == "failed"
++    assert "Reader failed" in inspect_metadata(path).detail
++
++
++def test_encrypted_pdf_requires_valid_password_for_evidence(tmp_path):
++    path = tmp_path / "encrypted.pdf"
++    with fitz.open() as document:
++        document.new_page()
++        document.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw="owner", user_pw="secret")
++    assert inspect_metadata(path).status == "unavailable"
++    assert inspect_metadata(path, password="incorrect").status == "unavailable"
++    assert inspect_metadata(path, password="secret").status == "not_found"
++
++
++def test_malformed_odt_metadata_is_failed_not_absent(tmp_path):
++    path = tmp_path / "malformed.odt"
++    with zipfile.ZipFile(path, "w") as archive:
++        archive.writestr("meta.xml", "<broken><metadata>")
++    assert inspect_metadata(path).status == "failed"
++    assert "no element found" in inspect_metadata(path).detail
++
++
++def test_corrupt_exif_warning_is_failed_not_absent(tmp_path):
++    path = tmp_path / "corrupt-exif.jpg"
++    # TIFF header declares an IFD entry but omits its twelve-byte body.
++    Image.new("RGB", (20, 15), "red").save(path, exif=b"Exif\x00\x00II*\x00\x08\x00\x00\x00\x01\x00")
++    evidence = inspect_metadata(path)
++    assert evidence.status == "failed"
++    assert "Corrupt EXIF" in evidence.detail
++
++
++def test_odt_preflight_matches_reader_utf8_decoding(tmp_path):
++    path = tmp_path / "utf16.odt"
++    with zipfile.ZipFile(path, "w") as archive:
++        archive.writestr("meta.xml", '<?xml version="1.0" encoding="UTF-16"?><metadata><author>Private author</author></metadata>'.encode("utf-16"))
++    assert inspect_metadata(path).status == "failed"
++
++
++def test_concurrent_clean_and_corrupt_checks_keep_warning_states_separate(tmp_path):
++    clean = photo(tmp_path / "clean.jpg")
++    corrupt = tmp_path / "corrupt.jpg"
++    Image.new("RGB", (20, 15), "red").save(corrupt, exif=b"Exif\x00\x00II*\x00\x08\x00\x00\x00\x01\x00")
++    paths = [clean, corrupt] * 4
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        results = list(pool.map(inspect_metadata, paths))
++    assert [item.status for item in results] == ["not_found", "failed"] * 4
++
++
++def test_inspector_exposes_unknown_and_selectable_output_evidence(qapp, tmp_path):
++    text = tmp_path / "notes.txt"
++    text.write_text("hello")
++    preview = ImagePreviewWidget()
++    preview.set_image(text)
++    assert preview.lbl_meta_privacy.text() == "Metadata inspection unavailable"
++    assert preview.lbl_meta_privacy.property("state") != "success"
++    output = tmp_path / "output.jpg"
++    evidence = MetadataEvidence("found", ("Artist",), "Supported field remains")
++    preview.set_output_evidence(output, evidence)
++    assert "Artist" in preview.lbl_output_metadata.text()
++    assert str(output) in preview.lbl_output_metadata.text()
++    assert preview.lbl_output_metadata.accessibleName() == "Output metadata check"
++    assert preview.lbl_output_metadata.focusPolicy() == Qt.FocusPolicy.StrongFocus
++    assert preview.lbl_output_metadata.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByKeyboard
++    assert "QLabel:focus" in preview.lbl_output_metadata.styleSheet()
++    preview.clear_preview()
++    assert preview.lbl_output_metadata.isHidden()
++    preview.close()
++
++
++def test_settings_describe_the_routes_that_actually_receive_flags(qapp):
++    settings = ConversionSettingsWidget()
++    assert settings.chk_strip_metadata.text() == "Remove supported metadata"
++    assert "where the format and conversion route allow" in settings.chk_strip_metadata.toolTip()
++    assert "PDF to TXT or DOCX" in settings.chk_enable_ocr.toolTip()
++    assert "Image to TXT always uses OCR" in settings.chk_enable_ocr.toolTip()
++    assert "image to DOCX embeds the image" in settings.chk_enable_ocr.toolTip()
++    assert "Word conversion routes do not use this field" in settings.line_password.toolTip()
++    assert "Keep supported EXIF" in settings.chk_preserve_exif.text()
++    settings.close()
++
++
++def test_constructed_pages_do_not_contain_old_guarantees(qapp):
++    widgets = [ImageConverterMainWindow(), ImageToolsPage(), PdfToolsPage(), CompressDialog(), ImageCompressDialog()]
++    banned = ["never overwritten", "originals were not changed", "no tracking tags", "Strip all metadata", "across all formats", "Drag-friendly", "Non-destructive save", "Original stays untouched", "already optimal", "150 DPI", "100 DPI", "smallest file size", "engine and output behavior stay unchanged"]
++    for widget in widgets:
++        strings = []
++        for child in widget.findChildren(QLabel) + widget.findChildren(QAbstractButton):
++            strings += [child.text(), child.toolTip(), child.accessibleDescription()]
++        combined = "\n".join(strings)
++        for phrase in banned:
++            assert phrase not in combined
++        widget.close()
++
++
++def test_footer_describes_current_destination_without_preservation_promise(qapp, tmp_path):
++    window = ImageConverterMainWindow()
++    assert "same folder as each source" in window.lbl_status_hint.text()
++    assert "Existing destination files may be replaced" in window.lbl_status_hint.text()
++    window.settings_widget.radio_custom_dir.setChecked(True)
++    window.settings_widget.line_out_dir.setText(str(tmp_path))
++    window._refresh_queue_ui()
++    assert str(tmp_path) in window.lbl_status_hint.text()
++    window.close()
++
++
++def test_worker_retains_completion_api_and_adds_actual_output_evidence(qapp, tmp_path):
++    source = photo(tmp_path / "source.jpg", with_metadata=True)
++    output = photo(tmp_path / "actual-output.jpg", with_metadata=True)
++    config = ConversionConfig(target_format="JPG", strip_metadata=True)
++    result = ConversionResult(success=True, input_path=str(source), output_path=str(output), output_size_bytes=output.stat().st_size)
++    received = []
++
++    def convert_batch(tasks, progress_callback, cancel_check):
++        assert tasks == [(source, output, config)]
++        assert not cancel_check()
++        progress_callback(1, 1, result)
++        return [result]
++
++    worker = BatchConversionWorker([(source, output, config)], SimpleNamespace(convert_batch=convert_batch))
++    worker.file_completed.connect(lambda index, item: received.append(("completed", index, item)))
++    worker.metadata_inspected.connect(lambda index, item: received.append(("metadata", index, item)))
++    worker.run()
++    assert received[0] == ("completed", 0, result)
++    assert received[1][0:2] == ("metadata", 0)
++    assert received[1][2].status == "found"
++    assert config.strip_metadata is True
++
++
++def test_worker_marks_document_image_evidence_partial(qapp, tmp_path):
++    source = tmp_path / "pages.pdf"
++    output = photo(tmp_path / "pages_1.jpg")
++    config = ConversionConfig(target_format="JPG")
++    result = ConversionResult(success=True, input_path=str(source), output_path=str(output))
++
++    def convert_batch(_tasks, progress_callback, **_kwargs):
++        progress_callback(1, 1, result)
++        return [result]
++
++    worker = BatchConversionWorker([(source, output, config)], SimpleNamespace(convert_batch=convert_batch))
++    received = []
++    worker.metadata_inspected.connect(lambda _index, item: received.append(item))
++    worker.run()
++    assert received[0].partial
++    assert "Only the first output file was checked" in received[0].output_text
++
++
++def test_completed_row_retains_evidence_and_source_preview(qapp, tmp_path):
++    source = photo(tmp_path / "source.jpg")
++    output = photo(tmp_path / "output.jpg", with_metadata=True)
++    window = ImageConverterMainWindow()
++    window.add_images([source])
++    window._active_rows = [0]
++    result = ConversionResult(success=True, input_path=str(source), output_path=str(output), output_size_bytes=output.stat().st_size, error_message="Existing warning")
++    window._on_file_completed(0, result)
++    evidence = inspect_metadata(output)
++    window._on_metadata_inspected(0, evidence)
++    window._on_batch_finished(1, 0, 0.1, source.stat().st_size, output.stat().st_size)
++    entry = window.queue_table.queue_model.entry(0)
++    assert entry.output_path == output
++    assert entry.status == "Warning"
++    assert "1 with supported fields" in window.lbl_metadata_result.text()
++    window._on_table_row_selected(str(source))
++    assert window.preview_widget.current_file_path == source
++    assert "Artist" in window.preview_widget.lbl_output_metadata.text()
++    assert "originals were not changed" not in window.lbl_status_hint.text()
++    window.close()
++
++
++def test_failed_and_unavailable_checks_do_not_become_success_counts():
++    summary = metadata_check_summary([MetadataEvidence("found", ("Author",)), MetadataEvidence("not_found"), MetadataEvidence("failed"), MetadataEvidence("unavailable")])
++    assert "1 with no supported fields found" in summary
++    assert "1 with supported fields" in summary
++    assert "2 unavailable or failed" in summary
++
++
++def test_rerun_clears_selected_output_evidence_until_new_check(qapp, tmp_path, monkeypatch):
++    source = photo(tmp_path / "source.jpg")
++    output = photo(tmp_path / "previous-output.jpg")
++    window = ImageConverterMainWindow()
++    window.add_images([source])
++    window._active_rows = [0]
++    result = ConversionResult(success=True, input_path=str(source), output_path=str(output), output_size_bytes=output.stat().st_size)
++    window._on_file_completed(0, result)
++    window._on_metadata_inspected(0, inspect_metadata(output))
++    window._on_table_row_selected(str(source))
++    assert not window.preview_widget.lbl_output_metadata.isHidden()
++    monkeypatch.setattr(BatchConversionWorker, "start", lambda _self: None)
++    window.start_conversion()
++    entry = window.queue_table.queue_model.entry(0)
++    assert entry.output_path is None
++    assert entry.metadata_evidence is None
++    assert window.preview_widget.lbl_output_metadata.isHidden()
++    assert not window.preview_widget.lbl_output_metadata.text()
++    window.close()
++
++
++def test_image_compressor_fallback_is_unchanged_and_reports_retained_metadata(qapp, tmp_path, monkeypatch):
++    source = photo(tmp_path / "original.jpg", with_metadata=True)
++    messages = []
++    monkeypatch.setattr(QMessageBox, "information", lambda _parent, _title, text, *_args: messages.append(text) or QMessageBox.StandardButton.Ok)
++    dialog = ImageCompressDialog(initial_files=[source])
++    dialog.combo_format.setCurrentText("JPG")
++    dialog.txt_output_dir.setText(str(tmp_path / "outputs"))
++
++    def larger_conversion(input_path, output_path, config):
++        assert config.strip_metadata
++        Path(output_path).write_bytes(Path(input_path).read_bytes() + b"larger output")
++        return ConversionResult(success=True, input_path=str(input_path), output_path=str(output_path))
++
++    monkeypatch.setattr(dialog.engine, "convert_single", larger_conversion)
++    dialog._execute_compress()
++    destination = tmp_path / "outputs" / "original_compressed.jpg"
++    assert destination.read_bytes() == source.read_bytes()
++    assert "unchanged copy saved" in messages[0]
++    assert "Original metadata and dimensions may remain" in messages[0]
++    assert "1 supported metadata field found" in messages[0]
++    assert dialog.lbl_result.property("state") == "warning"
++    assert dialog.lbl_result.accessibleName() == "Image compression result"
++    assert dialog.lbl_result.focusPolicy() == Qt.FocusPolicy.StrongFocus
++    assert dialog.lbl_result.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByKeyboard
++    assert "QLabel:focus" in dialog.lbl_result.styleSheet()
++    assert dialog.btn_compress.nextInFocusChain() == dialog.lbl_result
++    dialog.close()
++
++
++def test_larger_cross_format_output_reports_increase(qapp, tmp_path, monkeypatch):
++    source = photo(tmp_path / "tiny.jpg")
++    monkeypatch.setattr(QMessageBox, "information", lambda *_args: QMessageBox.StandardButton.Ok)
++    dialog = ImageCompressDialog(initial_files=[source])
++    dialog.combo_format.setCurrentText("PNG")
++
++    def larger_conversion(input_path, output_path, _config):
++        Image.effect_noise((200, 200), 80).convert("RGB").save(output_path)
++        return ConversionResult(success=True, input_path=str(input_path), output_path=str(output_path))
++
++    monkeypatch.setattr(dialog.engine, "convert_single", larger_conversion)
++    dialog._execute_compress()
++    assert "% larger" in dialog.lbl_result.text()
++    assert dialog.lbl_result.property("state") == "warning"
++    dialog.close()
++
++
++def test_pdf_profiles_match_actual_engine_parameters(qapp):
++    dialog = CompressDialog()
++    assert "1200 pixels" in dialog.rb_balanced.toolTip()
++    assert "quality 65" in dialog.rb_balanced.toolTip()
++    assert "800 pixels" in dialog.rb_max.toolTip()
++    assert "quality 40" in dialog.rb_max.toolTip()
++    assert "not guaranteed" in dialog.rb_max.toolTip()
++    assert "without re-encoding page images" in dialog.rb_lossless.toolTip()
++    dialog.close()
+diff --git a/image_converter/tests/test_tool_dialogs.py b/image_converter/tests/test_tool_dialogs.py
+--- a/image_converter/tests/test_tool_dialogs.py
++++ b/image_converter/tests/test_tool_dialogs.py
+@@ -203,7 +203,8 @@
+     title, text = info_messages[0]
+     assert title == "No Reduction Achieved"
+     assert "No reduction was achieved" in text
+-    assert "Original file preserved" in text
++    assert "An unchanged copy was saved" in text
++    assert "already optimal" not in text
+     assert "Note: No reduction was achieved" in dlg.lbl_result.text()
+ 
+ 
+diff --git a/docs/UI_COPY_AUDIT.md b/docs/UI_COPY_AUDIT.md
+new file mode 100644
+--- /dev/null
++++ b/docs/UI_COPY_AUDIT.md
+@@ -0,0 +1,73 @@
++# WP1 — truthful UI copy and output evidence
++
++The UI now describes supported operations and measured outputs. Conversion, compression, PDF and background-removal engine functions and configuration values are unchanged. Metadata evidence is a read-only UI check after a successful conversion, not a sanitation guarantee.
++
++## Changed claims
++
++| Severity / user impact | Old string | New string | Reason / source evidence |
++| --- | --- | --- | --- |
++| Low — avoid an unverified quality implication | Create clean cutouts locally. | Create cutouts locally. | Keep the local-processing statement without promising cutout quality. |
++| High — an existing original or output can be replaced | Your originals are never overwritten. | Output: same folder as each source. Existing destination files may be replaced. / Output: [chosen folder]. Existing destination files may be replaced. | `ImageConverterMainWindow.start_conversion` only avoids the current source path; the engine permits replacing other existing destinations. Batch-wide collision planning remains a hand-off item. |
++| High — completion does not verify source preservation | Completed in … Your originals were not changed. | Completed in … Select a row to review its output metadata check. | Completion only verifies the produced file and its size. No source hash or batch collision verification exists. |
++| High — absence and inability to inspect were confused | Clean (no tracking tags) | No supported metadata found / Metadata inspection unavailable / Metadata could not be inspected | The existing reader defaults `has_metadata` to false for unsupported formats and after some read failures. The UI adapter checks support, dependency flags, failures, PDF access and ODT XML validity before interpreting a negative result. |
++| High — metadata presence now has evidence | Has metadata | N supported metadata fields found | Report the names/count actually returned by the existing reader; avoid classifying every field as a tracking tag. |
++| High — universal removal was unverified | Strip all metadata from output | Remove supported metadata | Removal coverage varies by format and route. |
++| High — tooltip overstated supported coverage | Strip all personal identifiable information, author properties, camera/device tags, GPS coordinates, and timestamps across all formats. | Request removal of supported metadata, such as author, GPS and timestamps, where the format and conversion route allow. Review the output check after processing. | Some document routes return before stripping; same-format routes take a metadata-only path. These engine behaviors are preserved. |
++| High — revision/content privacy was not verified | Privacy mode removes author information, revision history, device details, and GPS tags. | Removal varies by format and conversion route. Some metadata may remain. Some same-format routes apply metadata removal without quality or resize changes. Document content and revision history are not comprehensively inspected. Output checks report supported fields found after processing. | Core-property/EXIF removal is not comprehensive revision-history or content sanitation. |
++| Medium — metadata preservation is route-dependent | Preserve EXIF Metadata (Images) | Keep supported EXIF metadata | Only supported EXIF data are passed to applicable image encoders. Tooltip explicitly excludes preserving every field. |
++| Medium — developer jargon suggested an unsupported capability | Metadata Cleaning & Sanitization | Metadata removal | One action verb; no sanitization guarantee. |
++| High — OCR scope differed from the routes | Enable OCR Text Fallback; Use OCR fallback when converting scanned PDFs or images to text/DOCX | Recognize scanned PDF text (OCR); Use OCR fallback for PDF to TXT or DOCX when text is missing. Image to TXT always uses OCR; image to DOCX embeds the image. OCR requires a local Tesseract installation. | PDF TXT/DOCX consume `enable_ocr`; image TXT always runs OCR; image DOCX embeds a picture. |
++| High — Word password capability was implied | Document OCR & Decryption; Encrypted PDF / Word… | PDF text recognition and password; Password for supported PDF routes | Word conversion routes do not receive the password field. Tooltip names the actual PDF scope. |
++| Medium — image DOCX is not recognized text | Editable Microsoft Word document output. | Word document output. Image inputs are embedded as pictures, without text recognition. | Image→DOCX builds a Word file containing the image. |
++| Medium — the UI list is not an authoritative capability registry | Formats valid for every file in the queue. | Output choices for this queue. Availability depends on the conversion route and installed tools. | Known list/router mismatches remain a hand-off item; choices and configuration semantics are unchanged. |
++| Medium — known unsupported PPTX routes | Convert compatible queue items to PPTX. | PowerPoint output. Some advertised input routes are unavailable and may report unsupported. | PDF→PPTX and Word→PPTX are listed in the UI but explicitly rejected by the engine. |
++| Low — compression varies | Modern image output with excellent compression. | WebP image output. File size varies by content and quality. | A smaller output is not assured. |
++| Medium — Merge lacks drag reordering | Drag-friendly ordering | Move files up or down | Merge uses the working Up/Down buttons. |
++| Medium — save destination can replace an input | Non-destructive save; Original stays untouched | Choose an output PDF | Organizer and PDF compression allow a user-selected destination and do not verify a separate unchanged original. |
++| Low — developer wording | Choose a focused workflow. Your existing PDF engine and output behavior stay unchanged. | Merge, split, organize or compress PDFs on this device. | Describe user outcomes. |
++| Medium — savings depend on content | Reduce PDF file size; Choose a balanced, maximum, or lossless profile and see the achieved reduction. | Try a smaller PDF; Choose a compression profile and see the measured result. Savings vary by PDF. | Compression may return an unchanged copy. |
++| Low — clarify measured evidence | Clear savings report | Measured savings report | The reported sizes come from compression results. |
++| Medium — image output may be larger | Reduce image file size; Create smaller image copies with WebP, JPEG, PNG optimization, optional resizing, and metadata removal. | Try smaller image copies; Choose WebP, JPEG or PNG output with quality, resize and supported metadata controls. Savings and applied settings vary by image and conversion route. | Cross-format output can grow; same-format metadata routes can skip quality/resize. |
++| Medium — avoid a blanket original guarantee | Originals stay untouched | Numbered output names when a file exists | Describes `ImageCompressDialog._destination_for` behavior directly. |
++| Medium — no guaranteed reduction | Create smaller image copies while keeping the originals unchanged. | Try smaller image copies. Savings and applied settings vary by image and conversion route. | Reports attempts rather than a guaranteed outcome. |
++| High — fallback can restore metadata and dimensions | Strip metadata from compressed copies | Remove supported metadata, with a tooltip explaining same-format limitations and unchanged-copy fallback | Existing fallback copies the original after conversion when its same-format result is larger. |
++| High — fallback was not surfaced | N compressed … (% saved) | N outputs saved … (% smaller / % larger); N unchanged copies saved because compression produced larger files. Original metadata and dimensions may remain. | The UI retains the existing fallback and reports it explicitly. Supported metadata are inspected after the fallback. |
++| Medium — aggregate growth was hidden | 0.0% saved for a larger output | [actual percentage] larger | Use the measured signed byte difference. |
++| Medium — unverified PDF mechanism/numbers | Reduce file size using image resampling and stream deflation. | Try a smaller PDF. Savings and visible changes depend on its content. | Plain outcome language. |
++| High — parameters did not match execution | Balanced (Recommended) — 150 DPI, 75% quality, stream deflation | Balanced (recommended): reduce image size and quality | Secondary tooltip states the actual 1200-pixel maximum dimension / JPEG quality 65 and warns visible changes are possible. |
++| High — minimum size was not guaranteed | Maximum Compression — 100 DPI, 55% quality, smallest file size | Stronger compression: more visible changes possible | Secondary tooltip states actual 800-pixel maximum dimension / JPEG quality 40, transparency removal, and no smaller-result guarantee. |
++| Medium — technical term overstated scope | Lossless — Deflate streams and remove xrefs without altering images | Keep image quality: try document compression | Secondary tooltip describes document compression/font subsetting without re-encoding page images. No guarantee about other document properties. |
++| High — an unsuccessful attempt does not prove optimality | No reduction was achieved (original was already optimal at …). Original file preserved. | No reduction was achieved with this profile (…). An unchanged copy was saved. | `compress_pdf` returned its original-copy fallback; no optimum was calculated. |
++| Medium — conversion runs concurrently | Cancel stops after the current file finishes.; Cancelling after the current file… | Cancellation skips work that has not started. Running files finish first.; Cancelling after running files finish… | Batch conversion uses concurrent workers. |
++| Medium — tools are not globally guarded | One processing job runs at a time to reduce resource use. | Conversion waits until background removal finishes. | Only the Convert/background-removal pair has this guard. |
++| Low — accessible upload wording contradicted local use | Upload files | Add local files | The control adds local paths; it does not upload. |
++| Low — unsupported is not the only no-add condition | Those files are already in the queue or are unsupported. | No new files were added. Check the selected paths and queue for duplicates. | Missing paths can also result in no additions. |
++
++## New measured-result states
++
++- Successful outputs receive `Output check: No supported metadata found`, a supported-field count, `Metadata inspection unavailable`, or `Metadata could not be inspected`.
++- The queue retains the actual output path, evidence and field names; selecting its source row exposes a selectable result label. A footer summarizes the checks without calling unknown results clean.
++- Conversion routes returning only the first image output explicitly say only that first file was checked. The UI does not claim to inspect additional outputs that the engine does not enumerate.
++- The Image Compress completion summary reports post-fallback metadata checks for the first five outputs and explicitly counts additional checks not shown. It does not claim unshown outputs were cleaned.
++- Metadata evidence covers the existing reader's supported fields only. It is not verification of comprehensive sanitization, document-content privacy, source preservation or all embedded metadata. ODT preflight deliberately matches the reader's UTF-8 decoding; unreadable encodings are reported as failed. Adapter warning contexts are serialized so concurrent inspector/worker checks do not consume each other's warning states.
++
++## Retained claims and evidence
++
++- **On-device / no uploads:** desktop processing paths use local engine/model calls. A tooltip explains that these tools process files on this device. No network or telemetry calls were added.
++- **Background-removal originals stay untouched:** its existing `plan_tasks` reserves input/existing/planned paths and publishes new output paths. This stronger planner is not shared by Convert.
++- **Background-removal lossless WebP:** `backgroundG/src/bgremove/export.py` passes `lossless=True` for WebP export.
++- **25 MiB / 120 megapixel background-removal input limits:** those are existing constants/validation limits, not inferred performance promises.
++- **PNG lossless format / WebP lossless option:** these describe encoding choices, not preservation of the input's dimensions or metadata.
++- Profile names and model descriptions describe intentions; model availability/readiness redesign remains WP5.
++
++## Vocabulary and styling
++
++Use **Remove** for supported metadata and selected queue items; use **Clear queue** for clearing the batch; use **Copy path**, **Open folder**, **Choose**, **Save**, **Run** and **Cancel** for their existing actions. Engine identifiers and filename suffixes such as `strip_metadata` and `_clean` are unchanged.
++
++The only new QSS is a token-based cyan focus border around the keyboard-selectable output-evidence and image-compression-result labels. Their transparent borders reserve space before focus, preserving layout. Existing dialog surfaces, typography and contrast tokens remain in force.
++
++## Verification scope
++
++`image_converter/tests/test_truthful_copy.py` covers supported/unsupported/failed inspections; missing optional readers; encrypted PDF access; malformed ODT metadata and corrupt EXIF warnings; informational GPS warnings; source versus output evidence; unchanged existing worker signal APIs; first-output-only evidence; source-preservation copy; OCR/password scope; original-copy fallback; larger cross-format output; and correct secondary PDF parameters. Existing dialog expectations intentionally change from “Original file preserved” to the measured fallback wording.
++
++Engine fixes required outside this UI package: batch-wide output collisions; metadata early returns and cross-format coverage; original-copy fallbacks restoring metadata/dimensions; capability-list/router mismatches; model-level busy guards. WP2–WP8 architecture/state changes are staged separately.
+diff --git a/docs/UI_UX_DELIVERY.md b/docs/UI_UX_DELIVERY.md
+new file mode 100644
+--- /dev/null
++++ b/docs/UI_UX_DELIVERY.md
+@@ -0,0 +1,152 @@
++# UI/UX delivery — 19 October 2026
++
++This delivery implements WP0 and WP1. WP2–WP8 are explicitly deferred below, as permitted by the definition of done. The full redesign is **not** complete. Existing local changes were preserved; conversion, PDF, compression and background-removal engine behavior was not changed.
++
++## READ: repository and baseline
++
++- `launch_converter.py` selects GUI or CLI; `main.py` is a compatibility entry point.
++- `image_converter/ui/main_window.py::ImageConverterMainWindow` owns the header, page stack, Convert composition, intake and job routing.
++- `components.py::ConversionSettingsWidget` and `ImagePreviewWidget` own settings and inspection. The active Convert table is `queue_model.py::QueueTableModel` / `QueueTableView`; the older `components.QueueTableWidget` and `nav_rail.NavRailWidget` are not the active main composition.
++- `image_tools_page.py::ImageToolsPage` and `pdf_tools_page.py::PdfToolsPage` are launch pages. `tool_dialogs.py` contains `MergeDialog`, `SplitDialog`, `OrganizePagesDialog`, `ImageCompressDialog`, and `CompressDialog`.
++- `background_removal_page.py::BackgroundRemovalPage` / `CutoutPreview` already have asynchronous preview/copy paths; `worker.py::BatchConversionWorker` and `background_worker.py::BackgroundRemovalWorker` own the existing batch threads.
++- `theme.py` owns QSS/tokens; `contrast.py` previously checked token pairs only. `dev_capture_states.py` was an incomplete capture script.
++- Engines are in `image_converter/core/`; background model readiness already exists in `backgroundG/src/bgremove/readiness.py`.
++- Both GUI reports and their linked screenshots exist. No blocking input was missing. The current working tree contained substantial pre-existing changes, including engine and UI changes, before this work.
++
++Baseline verification: 39 focused UI tests passed. During WP0, the pre-existing app test set passed **420 tests in 157.60 seconds**. That full run printed recoverable Windows Office COM exception diagnostics; a pytest pass does not establish native Office reliability.
++
++## WP0 — implemented: readable dialogs and control states
++
++**P2, user impact:** dialog headings and labels are now readable without depending on the desktop palette or PNG viewer background. Checkboxes communicate checked and mixed states with visible marks. Spinboxes expose usable up/down controls, including inactive limits.
++
++Ordered work:
++1. Inspect the actual screenshot pixels and reproduce transparent dialog surfaces.
++2. Resolve QSS cascade order and give each utility dialog an explicit surface/palette.
++3. Add small local SVG marks/arrows and explicit normal, checked, mixed, disabled, focused and step-limit states.
++4. Audit rendered label backgrounds, including a deliberately bad 2× contrast fixture.
++5. Extend and run repeatable captures at both requested window sizes.
++
++Files changed: `image_converter/ui/theme.py`, `contrast.py`, the five constructors/import in `tool_dialogs.py`, `dev_capture_states.py`, local SVG assets, and new `image_converter/tests/test_ui_rendering.py`. Complete applicable diff: [WP0.patch](ui-ux-patches/WP0.patch).
++
++QSS rationale: place opaque top-level rules after transparent child rules; explicitly apply the dialog palette/stylesheet. Keep color, spacing and type tokens. Use a constant indicator border width so focus does not move text or clip a mark. Reserve separate right-hand spinbox button regions, and use `:off` as well as disabled states. No bitmap generation or new dependency is required.
++
++Evidence correction: the supplied PNG backgrounds outside cards are transparent (`RGBA 0,0,0,0`), rather than painted white. Light text disappears when a viewer composites those pixels on white. This confirms an offscreen defect; it does not prove the same appearance occurred on the native Windows desktop. The fixed surfaces are opaque. Native compositor, Windows high contrast and screen-reader behavior remain unverified.
++
++Tests cover actual title/subtitle/label contrast ≥4.5:1 under a light system palette, opaque backgrounds for all five dialogs, three checkbox states, disabled marks, stable focus geometry, radio dots, integer/double spinbox hit regions and step limits. The 2× negative control prevents an incorrect logical/physical coordinate conversion from silently passing the contrast check. The 125% check exposed faint antialiased double-spinbox arrows; spin-only SVG strokes were strengthened without lowering test thresholds. The final 23 rendering tests pass at each of 100%, 125%, 150% and 200% offscreen scaling.
++
++## WP1 — implemented: evidence-based copy and output checks
++
++**P1/P2, user impact:** output destinations no longer carry a false overwrite guarantee; metadata inspection distinguishes absent supported fields from unavailable or failed inspection. Successful conversions expose a check of the actual reported output rather than a blanket cleaning promise.
++
++Ordered work:
++1. Audit footer, inspector, settings, launch cards, OCR/password help and compression results against source behavior.
++2. Introduce a UI-only metadata evidence adapter with found/not-found/unavailable/failed states.
++3. Inspect successful outputs away from the GUI thread without changing engine arguments or result types.
++4. Store and display output evidence, including partial coverage for multi-output routes.
++5. Describe compressor original-copy fallbacks explicitly and verify the saved copy.
++
++The full old/new/reason table and action vocabulary are in [UI_COPY_AUDIT.md](UI_COPY_AUDIT.md). Complete applicable diff, applied after WP0: [WP1.patch](ui-ux-patches/WP1.patch).
++
++Files changed: `components.py::ImagePreviewWidget` / `ConversionSettingsWidget`; `main_window.py::ImageConverterMainWindow`; `worker.py::BatchConversionWorker`; `queue_model.py::QueueEntry` / `QueueTableModel`; both tool-page classes; compression dialog outcome copy; one background-page subtitle; new `metadata_evidence.py`; capture/result fixtures; UI regression tests. Engine functions and conversion configuration semantics remain unchanged. No new QSS tokens are required by WP1; keyboard-selectable result labels use the existing focus color and a reserved border.
++
++Risk: post-output inspection adds local reads and cannot establish complete sanitization. It reports only supported fields and explicitly identifies unknown/failed checks. Convert checks run in its worker; tool-dialog work and checks remain synchronous until WP2. Where an engine returns one path for multiple output files, the UI labels its inspection coverage as partial. Existing privacy limitations remain in the hand-off below. Existing keyboard shortcuts are preserved; their known hidden-workspace routing remains deferred to WP2.
++
++## WP2 — deferred: reusable embedded workspaces
++
++**P2, remaining impact:** normal Image/PDF Tools still use modal launch paths; the five tool operations and organizer thumbnail rendering remain synchronous. Global commands/drop routing on those pages remain as documented in the GUI report.
++
++Reason for staging: extraction changes all five job lifecycles and the existing synchronous dialog contracts. PDF services currently have no intra-operation progress/cancellation hooks. A worker can keep the UI responsive but cannot truthfully promise immediate cancellation. This needs a separate engine-adjacent patch with immutable inputs and an explicit cancellation contract, rather than being hidden inside palette/copy changes.
++
++Exact targets: five dialog classes in `tool_dialogs.py`, `ImageToolsPage`, `PdfToolsPage`, main-window tool entry points, `_setup_shortcuts`, `dropEvent`, `_build_header`, and worker integration. Order: reusable content/widgets with compatibility wrappers → workers and boundary cancellation → in-page results → active intake/shortcuts → shared job indicator. Tests: existing output/error assertions using event-loop waits; active drop/shortcut routing; responsiveness; retained results; close/cancel safety. Main risk is worker lifetime and mutable UI state during jobs.
++
++## WP3 — deferred: Convert workspace redesign
++
++**P2/P3, remaining impact:** presets still need Custom/mixed handling; defaults, inspector replacement, table layout, rough estimates, row result actions and selectable error details need the requested redesign. WP1 output evidence is a prerequisite, not delivery of WP3.
++
++Reason for staging: these changes share queue identity/selection contracts with the known busy-model defect and should be verified together. Replacing the inspector also intentionally invalidates an existing stacked-inspector test. No calibrated estimator was found; the planned UI must hide uncalibrated values rather than imply calibration.
++
++Exact targets: `ConversionSettingsWidget` preset/context methods, `ImagePreviewWidget`, `QueueEntry`, `QueueTableModel`, `QueueTableView` and its delegates; main-window queue/settings/selection/completion methods. Order: type-aware defaults → presets/Custom → mixed defaults → persistent settings/inspector → table/Actual/result actions → error details. Tests: type defaults; manual preset invalidation; mixed batch behavior; selection preservation; measured-only sizes; output-path actions and error copying. Keep logical column identifiers stable where visual reordering suffices.
++
++## WP4 — deferred: form/table hygiene
++
++**P2/P3, remaining impact:** informational Merge/Image Compress cells remain editable; inactive Split/Fit/Padding fields still need dependent disabling, hints and full-path treatment.
++
++Reason for staging: apply these changes to the reusable controls extracted in WP2, instead of making and then replacing a second form implementation. The one-row Image Compress appearance is caused by vertical crowding despite an existing stretch factor; an extra stretch alone would not resolve it.
++
++Exact targets: `MergeDialog` table construction/refresh, `ImageCompressDialog` table/options, `SplitDialog` mode/range controls, `ConversionSettingsWidget`, `BackgroundRemovalPage`. Order: read-only flags → path elision/tooltips → enablement with retained values → range-count validation using existing parser → flexible file lists. Tests: no editing, full tooltips, mode changes preserve values, valid/invalid ranges and minimum-height layout.
++
++## WP5 — deferred: background layout, readiness and comparison
++
++**P2/P3, remaining impact:** previews still share height with settings; advanced controls lack the requested explanation/reset; there is no synchronized zoom/pan, preview backdrop selector, per-profile readiness display or thumbnail queue. Copy feedback still shares the status area.
++
++Reason for staging: this is a self-contained interaction redesign with asynchronous readiness/thumbnail generation. It needs stale-result and clipboard regressions covered before replacing the existing working page. Preview backdrop settings must remain separate from output background settings.
++
++Exact targets: `BackgroundRemovalPage._build_ui`, `_toggle_advanced`, `_update_model_hint`, intake/selection/copy/status methods, `CutoutPreview`. Order: full-height settings drawer/splitter → help/reset/buddies → linked Fit-relative zoom/pan → preview-only backdrops → asynchronous local readiness/thumbnails → Copy toast. Reuse `resolve_model_directory` separately per profile and `check_models` off-thread; do not download/load inference models for readiness. Tests: minimum-size layout, unchanged engine defaults, relative transform synchronization, stale responses and full-resolution alpha copying.
++
++## WP6 — deferred: organizer and compression presentation
++
++**P2/P3, remaining impact:** organizer still needs multi-select, cached larger thumbnails, size control, undo/redo, contextual actions and dirty/discard handling. WP1 corrects false profile metrics and “already optimal” claims; that does not deliver the wider profile/organizer redesign.
++
++Reason for staging: current organizer mutations rebuild thumbnails and rely on one current row. Multi-selection/history must replace that state model coherently to avoid saving a different page order from the one shown. Drag ordering will remain absent until the complete reorder/save behavior is tested.
++
++Exact targets: `OrganizePagesDialog` loading/rendering/mutation/save methods and `CompressDialog` profile construction. Order: document state/dirty tracking → undo stack → multi-select mutations → cached scalable thumbnails → shortcuts/context actions → outcome-first profiles. Tests: undo/redo restores order/rotation/deletion; discard switching PDFs; multi-page moves; selection preservation; existing save/error behavior.
++
++## WP7 — deferred: shared chrome and typography
++
++**P3, remaining impact:** page headers, selected navigation treatment, badge prominence, decorative cyan and nesting remain outside this patch. The badge explanation may be corrected by WP1 copy work.
++
++Reason for staging: shared header reflow must be designed together with WP8 text scaling; simply enlarging fixed-pixel QSS would overflow the existing header at minimum width. Avoid changing the same page compositions before WP2/WP5 extraction.
++
++Exact targets: main-window `_build_header` / `_set_app_mode`, all four page-header builders, `theme.py`, shared header helper to be introduced. Order: one header pattern → nav selection/badge → reduce nesting/decorative cyan → reflow and type rules. Tests: selected state, contrast and both widths with enlarged text. Do not modify legacy `nav_rail.py` to fix the actual header.
++
++## WP8 — deferred: accessibility, scaling and safe preferences
++
++**P2/P3, remaining impact:** comprehensive field buddies/names/tab paths, Ctrl+1…4, visible shortcut reference, text preference, QSettings/reset and native assistive-technology checks are not complete.
++
++Reason for staging: persistence must use an explicit safe allowlist because current conversion options include passwords. Tests currently assume fresh Convert state, so a settings store must be isolated in tests before persistence is enabled. Fixed-pixel theme rules and custom preview painting also need coordinated high-contrast/scaling work.
++
++Exact targets: main-window initialization, `_setup_shortcuts`, `_setup_tab_order`, `closeEvent`, field builders across pages/dialogs, `CutoutPreview`, theme generation. Order: accessible fields/tab paths → page shortcuts/reference → scalable theme/header → injected QSettings with safe allowlist → reset → native validation. Tests: isolated INI restoration, invalid settings, no persisted passwords, accepted-close geometry, reset without queue loss, scaling and keyboard routes. History remains optional and deferred.
++
++## Reproduce and review captures
++
++Run from the repository root:
++
++```powershell
++.\venv\Scripts\python.exe -m image_converter.ui.dev_capture_states --output scratch/ui-ux-after/1380x860 --width 1380 --height 860
++.\venv\Scripts\python.exe -m image_converter.ui.dev_capture_states --output scratch/ui-ux-after/1120x700 --width 1120 --height 700
++# Repeat with QT_SCALE_FACTOR=1.25, 1.5 or 2 in separate processes/directories.
++```
++
++The script captures all four current pages, four PDF selections, all five dialogs, checkbox/stepper states, and Convert empty/single-type/mixed/selected/running/completed/partial-failure states. Completed sizes come from a real PNG→WebP, PDF→TXT, DOCX→TXT, XLSX→CSV sample batch. A real same-format compression fallback demonstrates retained author metadata and the new warning. Running and failure states are deterministic layout fixtures; the manifest states that distinction. It fixes the old script's Image Tools capture mislabeled as PDF Tools.
++
++Before references: existing `scratch/ui-report/01…14` plus `scratch/ui-ux-before/{1380x860,1120x700}`. The older baseline script used simulated completion metrics; those images are historical layout references, not conversion evidence. After references: `scratch/ui-ux-after/{1380x860,1120x700}` and corresponding `ui-ux-after-scale-125`, `-150`, `-200` folders. Each configuration has 23 captures and a manifest, for 184 after captures. [Capture index](UI_UX_CAPTURE_INDEX.html) links every image and before/after pairs. Deferred feature states cannot be captured as implemented states.
++
++## Engine hand-off — deliberately unchanged
++
++| Severity | Required fix and source evidence | User impact / required acceptance |
++|---|---|---|
++| P1 | Batch-wide output collision planning; main-window planner checks only the current source/destination pair and the image writer uses `os.replace`. | One queued output can replace another input or existing file. Reserve all inputs and planned/multi-file outputs; establish and test a collision policy before restoring safety claims. |
++| P1 | Metadata early return and route omissions in `core/conversion/engine.py`; same-format removal returns before resize/quality, while several cross-format routes return before removal. | Requested transformations/cleaning can be skipped. Test combined settings and report route-specific results. |
++| P1 | Image compression original-copy fallback in `tool_dialogs.py`; PDF fallback in `core/pdf/tools.py`. | Copying the original can restore metadata and undo requested image transforms. Preserve this existing behavior here, describe it honestly, and separately change the pipeline with explicit semantic-transform tests. |
++| P2 | Capability-list mismatches: UI offers PDF→PPTX, Word→PPTX and PPTX→DOCX routes that engine branches reject. | Users can select jobs that cannot run. Introduce one tested authoritative capability source; do not fabricate a registry implementation. |
++| P2 | Busy queue model guard and stable job identities; target editors and context removal can bypass toolbar restrictions. | Running row indices/settings can change. Guard mutations at the model and snapshot stable task identities; test every intake/removal/edit route. |
++
++## Executed verification
++
++```powershell
++.\venv\Scripts\python.exe -m pytest image_converter/tests backgroundG/tests training/tests -q -rs
++# Rendering checks were repeated in fresh processes with QT_SCALE_FACTOR=1, 1.25, 1.5, 2:
++.\venv\Scripts\python.exe -m pytest image_converter/tests/test_ui_rendering.py -q
++```
++
++- Final combined suite: **797 passed, 3 skipped in 174.57 seconds**, exit code 0. The three skips are existing symlink safety tests: Windows refused symlink creation with WinError 1314. [Full log](../scratch/ui-ux-final-tests.log).
++- Rendering/state checks: **23 passed at each of four scale factors** after the final arrow repair; test thresholds were not weakened.
++- New truthful-copy checks: **29 cases**; the focused rendering/copy/dialog/model selection set passed 70 tests before final full-suite verification.
++- Captures: **184 PNGs** validated for expected logical size × DPR and opaque top-left pixels; all eight capture processes exited successfully. Real sample conversions and actual fallback results are distinguished from layout fixtures in manifests.
++- Runtime used: Python 3.14.2, PySide6 6.11.2, pytest 9.1.1 in the existing `venv`. Qt UI checks use the offscreen platform. Office tests emitted recoverable native COM exception diagnostics despite the passing pytest result.
++
++The complete patches contain the changes made here, excluding pre-existing working-tree edits. WP0 applies to that baseline; WP1 applies after WP0. Capture PNGs/logs remain in `scratch/`; their review index is a generated local artifact.
++
++## Verification limits
++
++Offscreen captures, explicit palettes, rendered contrast and widget tests are evidence for the states actually exercised. They do not certify screen readers, native Windows DPI/monitor transitions, Windows high contrast, larger system text or every conversion route. The current minimum-width header still clips navigation labels; that is visible in captures and remains in WP7/WP8. Background result/inference captures from the prior report remain historical references; this capture script does not run background models. The packaged executable was not rebuilt. Its existing spec includes the entire assets directory, including the new SVGs. No telemetry, network calls, model downloads or new heavy dependency were added by these changes.
+diff --git a/docs/UI_UX_CHANGELOG.md b/docs/UI_UX_CHANGELOG.md
+new file mode 100644
+--- /dev/null
++++ b/docs/UI_UX_CHANGELOG.md
+@@ -0,0 +1,23 @@
++# UI change log — 19 October 2026
++
++**Delivered: WP0–WP1. The full redesign remains staged.**
++
++- **WP0 / P2:** all five utility dialogs have explicit opaque dark surfaces and readable headings/labels. Checked/mixed/disabled checkboxes have visible marks and stable focus rings. Spinbox arrows have separate hit areas and inactive-limit states; stronger strokes address fractional scaling.
++- **WP1 / P1–P2:** removed unsafe source-preservation and universal privacy promises, scoped OCR/password help, corrected PDF profile details, and described compressor unchanged-copy fallbacks and output growth. Convert stores actual output paths and shows supported-field checks, including unavailable/failed inspection. These are UI checks, not comprehensive sanitization.
++- Conversion arguments, engine behavior, existing shortcuts and local processing are preserved. No heavy dependency, telemetry, network call or download was added.
++
++| Deferred | Reason and remaining user impact |
++|---|---|
++| WP2 | Reusable inline tools need a coordinated worker/cancellation lifecycle; modal launch paths and synchronous tools remain. |
++| WP3 | Queue/default/preset/inspector changes share state contracts with the busy-model hand-off; estimates and result-action redesign remain. |
++| WP4 | Apply hygiene to the extracted forms; editable informational cells and inactive-field guidance remain. |
++| WP5 | Preview-first layout, linked comparison and asynchronous readiness need stale-result/clipboard coverage; current background layout remains. |
++| WP6 | Multi-select/history require coherent organizer state; full editing/profile redesign remains. |
++| WP7 | Shared headers/nav must reflow with scalable text; minimum-width navigation clipping remains. |
++| WP8 | Safe settings isolation, scalable QSS, full accessibility and native validation require their own patch; no passwords are persisted. |
++
++Final combined app/background/training suite: **797 passed, 3 skipped** (174.57s). Windows symlink privileges caused the three skips; Office COM diagnostics occurred despite the passing run. Rendering tests: **23 passed at each of 100%, 125%, 150%, 200% offscreen scaling**. Truthful-copy tests cover 29 cases. The script creates **184 after captures**, including real conversions/fallback; running/failure layouts are labeled fixtures. Native DPI/high contrast, screen readers, larger system text and packaged builds remain unverified.
++
++Engine hand-off: batch-wide output collision planning; metadata early-return/route coverage; original-copy fallbacks restoring metadata/dimensions; capability-list/router mismatches; model-level busy guards and stable job identities. These defects are documented, not silently fixed.
++
++See [delivery details and package plans](UI_UX_DELIVERY.md), [old/new copy table](UI_COPY_AUDIT.md), [capture index](UI_UX_CAPTURE_INDEX.html), and the complete [WP0](ui-ux-patches/WP0.patch) / [WP1](ui-ux-patches/WP1.patch) patches. Apply patches in that order to the working-tree baseline; existing changes are excluded from the patches.
+diff --git a/docs/UI_UX_CAPTURE_INDEX.html b/docs/UI_UX_CAPTURE_INDEX.html
+new file mode 100644
+--- /dev/null
++++ b/docs/UI_UX_CAPTURE_INDEX.html
+@@ -0,0 +1,1206 @@
++<!doctype html>
++<html lang="en">
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1">
++<title>UI review captures — WP0–WP1</title>
++<style>body{font:16px/1.5 "Segoe UI",sans-serif;background:#07111f;color:#f4f8ff;margin:24px;max-width:1800px}a{color:#67dfff}h1{font-size:28px}h2{font-size:22px;margin-top:32px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:16px}figure{margin:0;padding:12px;background:#0d1b2e;border:1px solid #476380;border-radius:10px}img{width:100%;height:auto;display:block;background:white}figcaption{margin-top:8px;font-size:14px;color:#b8c7d9}summary{padding:14px;cursor:pointer;font-weight:600}details{border:1px solid #476380;border-radius:10px;margin:18px 0;padding:0 12px 12px}a:focus,summary:focus{outline:3px solid #67dfff;outline-offset:3px}</style>
++<h1>WP0–WP1: review captures</h1>
++<p>184 after captures: 23 states × two logical window sizes × four offscreen scale factors. Click an image for full size. Native Windows DPI, high contrast and screen readers remain unverified.</p>
++<p>Completed Convert results and the unchanged-image-copy fallback use real local engine runs. Running and partial-failure screens are layout fixtures. Historical before captures contain simulated completion metrics and must not be used as engine evidence.</p>
++<p>Baseline dialog images below are composited on white to expose their transparent background defect; fixed dialogs are opaque.</p>
++<p>
++<a href="UI_UX_DELIVERY.md">Delivery and deferred packages</a> · <a href="UI_COPY_AUDIT.md">Copy audit</a> · <a href="UI_UX_CHANGELOG.md">Change log</a>
++</p>
++<h2>Before / after</h2>
++<h3>Merge dialog: transparent baseline versus opaque surface</h3>
++<div class="grid comparisons">
++<figure>
++<a href="../scratch/ui-report/10-merge-dialog.png">
++<img loading="lazy" src="../scratch/ui-report/10-merge-dialog.png" alt="Merge dialog: transparent baseline versus opaque surface — Before">
++</a>
++<figcaption>Before</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/12-dialog-merge.png" alt="Merge dialog: transparent baseline versus opaque surface — After">
++</a>
++<figcaption>After</figcaption>
++</figure>
++</div>
++<h3>Image compression: visible checkmarks and steppers</h3>
++<div class="grid comparisons">
++<figure>
++<a href="../scratch/ui-report/14-compress-images-dialog.png">
++<img loading="lazy" src="../scratch/ui-report/14-compress-images-dialog.png" alt="Image compression: visible checkmarks and steppers — Before">
++</a>
++<figcaption>Before</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/12-dialog-compress-images.png" alt="Image compression: visible checkmarks and steppers — After">
++</a>
++<figcaption>After</figcaption>
++</figure>
++</div>
++<h3>Convert inspector and output evidence</h3>
++<div class="grid comparisons">
++<figure>
++<a href="../scratch/ui-report/03-convert-file-inspector.png">
++<img loading="lazy" src="../scratch/ui-report/03-convert-file-inspector.png" alt="Convert inspector and output evidence — Before">
++</a>
++<figcaption>Before</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/06-output-check.png" alt="Convert inspector and output evidence — After">
++</a>
++<figcaption>After</figcaption>
++</figure>
++</div>
++<h2>100% offscreen scaling · 1380x860</h2>
++<div class="grid">
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/01-empty.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/01-empty.png" alt="01-empty, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>01-empty</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/02-drag-over.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/02-drag-over.png" alt="02-drag-over, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>02-drag-over</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/03-single-type.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/03-single-type.png" alt="03-single-type, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>03-single-type</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/03-populated-mixed.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/03-populated-mixed.png" alt="03-populated-mixed, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>03-populated-mixed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/04-row-selected.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/04-row-selected.png" alt="04-row-selected, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>04-row-selected</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/05-converting.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/05-converting.png" alt="05-converting, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>05-converting</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/06-completed.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/06-completed.png" alt="06-completed, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>06-completed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/06-output-check.png" alt="06-output-check, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>06-output-check</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/07-error.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/07-error.png" alt="07-error, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>07-error</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/08-image-tools.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/08-image-tools.png" alt="08-image-tools, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>08-image-tools</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/09-pdf-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/09-pdf-merge.png" alt="09-pdf-merge, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>09-pdf-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/09-pdf-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/09-pdf-split.png" alt="09-pdf-split, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>09-pdf-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/09-pdf-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/09-pdf-organize.png" alt="09-pdf-organize, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>09-pdf-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/09-pdf-compress.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/09-pdf-compress.png" alt="09-pdf-compress, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>09-pdf-compress</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/10-background.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/10-background.png" alt="10-background, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>10-background</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/11-background-advanced.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/11-background-advanced.png" alt="11-background-advanced, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>11-background-advanced</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/12-dialog-merge.png" alt="12-dialog-merge, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/12-dialog-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/12-dialog-split.png" alt="12-dialog-split, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/12-dialog-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/12-dialog-organize.png" alt="12-dialog-organize, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/12-dialog-compress-pdf.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/12-dialog-compress-pdf.png" alt="12-dialog-compress-pdf, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-pdf</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/12-dialog-compress-images.png" alt="12-dialog-compress-images, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-images</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/13-control-states.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/13-control-states.png" alt="13-control-states, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>13-control-states</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1380x860/14-image-compression-unchanged-copy.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1380x860/14-image-compression-unchanged-copy.png" alt="14-image-compression-unchanged-copy, 1380x860, 100% offscreen scaling">
++</a>
++<figcaption>14-image-compression-unchanged-copy</figcaption>
++</figure>
++</div>
++<h2>100% offscreen scaling · 1120x700</h2>
++<div class="grid">
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/01-empty.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/01-empty.png" alt="01-empty, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>01-empty</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/02-drag-over.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/02-drag-over.png" alt="02-drag-over, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>02-drag-over</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/03-single-type.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/03-single-type.png" alt="03-single-type, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>03-single-type</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/03-populated-mixed.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/03-populated-mixed.png" alt="03-populated-mixed, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>03-populated-mixed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/04-row-selected.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/04-row-selected.png" alt="04-row-selected, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>04-row-selected</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/05-converting.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/05-converting.png" alt="05-converting, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>05-converting</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/06-completed.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/06-completed.png" alt="06-completed, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>06-completed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/06-output-check.png" alt="06-output-check, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>06-output-check</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/07-error.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/07-error.png" alt="07-error, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>07-error</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/08-image-tools.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/08-image-tools.png" alt="08-image-tools, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>08-image-tools</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/09-pdf-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/09-pdf-merge.png" alt="09-pdf-merge, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>09-pdf-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/09-pdf-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/09-pdf-split.png" alt="09-pdf-split, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>09-pdf-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/09-pdf-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/09-pdf-organize.png" alt="09-pdf-organize, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>09-pdf-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/09-pdf-compress.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/09-pdf-compress.png" alt="09-pdf-compress, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>09-pdf-compress</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/10-background.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/10-background.png" alt="10-background, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>10-background</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/11-background-advanced.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/11-background-advanced.png" alt="11-background-advanced, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>11-background-advanced</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/12-dialog-merge.png" alt="12-dialog-merge, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/12-dialog-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/12-dialog-split.png" alt="12-dialog-split, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/12-dialog-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/12-dialog-organize.png" alt="12-dialog-organize, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/12-dialog-compress-pdf.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/12-dialog-compress-pdf.png" alt="12-dialog-compress-pdf, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-pdf</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/12-dialog-compress-images.png" alt="12-dialog-compress-images, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-images</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/13-control-states.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/13-control-states.png" alt="13-control-states, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>13-control-states</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after/1120x700/14-image-compression-unchanged-copy.png">
++<img loading="lazy" src="../scratch/ui-ux-after/1120x700/14-image-compression-unchanged-copy.png" alt="14-image-compression-unchanged-copy, 1120x700, 100% offscreen scaling">
++</a>
++<figcaption>14-image-compression-unchanged-copy</figcaption>
++</figure>
++</div>
++<details>
++<summary>125% offscreen scaling · 1380x860</summary>
++<h2>125% offscreen scaling · 1380x860</h2>
++<div class="grid">
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/01-empty.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/01-empty.png" alt="01-empty, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>01-empty</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/02-drag-over.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/02-drag-over.png" alt="02-drag-over, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>02-drag-over</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/03-single-type.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/03-single-type.png" alt="03-single-type, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>03-single-type</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/03-populated-mixed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/03-populated-mixed.png" alt="03-populated-mixed, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>03-populated-mixed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/04-row-selected.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/04-row-selected.png" alt="04-row-selected, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>04-row-selected</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/05-converting.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/05-converting.png" alt="05-converting, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>05-converting</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/06-completed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/06-completed.png" alt="06-completed, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>06-completed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/06-output-check.png" alt="06-output-check, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>06-output-check</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/07-error.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/07-error.png" alt="07-error, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>07-error</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/08-image-tools.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/08-image-tools.png" alt="08-image-tools, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>08-image-tools</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/09-pdf-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/09-pdf-merge.png" alt="09-pdf-merge, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>09-pdf-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/09-pdf-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/09-pdf-split.png" alt="09-pdf-split, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>09-pdf-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/09-pdf-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/09-pdf-organize.png" alt="09-pdf-organize, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>09-pdf-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/09-pdf-compress.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/09-pdf-compress.png" alt="09-pdf-compress, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>09-pdf-compress</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/10-background.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/10-background.png" alt="10-background, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>10-background</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/11-background-advanced.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/11-background-advanced.png" alt="11-background-advanced, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>11-background-advanced</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-merge.png" alt="12-dialog-merge, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-split.png" alt="12-dialog-split, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-organize.png" alt="12-dialog-organize, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-compress-pdf.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-compress-pdf.png" alt="12-dialog-compress-pdf, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-pdf</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/12-dialog-compress-images.png" alt="12-dialog-compress-images, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-images</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/13-control-states.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/13-control-states.png" alt="13-control-states, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>13-control-states</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1380x860/14-image-compression-unchanged-copy.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1380x860/14-image-compression-unchanged-copy.png" alt="14-image-compression-unchanged-copy, 1380x860, 125% offscreen scaling">
++</a>
++<figcaption>14-image-compression-unchanged-copy</figcaption>
++</figure>
++</div>
++</details>
++<details>
++<summary>125% offscreen scaling · 1120x700</summary>
++<h2>125% offscreen scaling · 1120x700</h2>
++<div class="grid">
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/01-empty.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/01-empty.png" alt="01-empty, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>01-empty</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/02-drag-over.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/02-drag-over.png" alt="02-drag-over, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>02-drag-over</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/03-single-type.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/03-single-type.png" alt="03-single-type, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>03-single-type</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/03-populated-mixed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/03-populated-mixed.png" alt="03-populated-mixed, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>03-populated-mixed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/04-row-selected.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/04-row-selected.png" alt="04-row-selected, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>04-row-selected</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/05-converting.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/05-converting.png" alt="05-converting, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>05-converting</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/06-completed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/06-completed.png" alt="06-completed, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>06-completed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/06-output-check.png" alt="06-output-check, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>06-output-check</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/07-error.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/07-error.png" alt="07-error, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>07-error</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/08-image-tools.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/08-image-tools.png" alt="08-image-tools, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>08-image-tools</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/09-pdf-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/09-pdf-merge.png" alt="09-pdf-merge, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>09-pdf-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/09-pdf-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/09-pdf-split.png" alt="09-pdf-split, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>09-pdf-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/09-pdf-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/09-pdf-organize.png" alt="09-pdf-organize, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>09-pdf-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/09-pdf-compress.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/09-pdf-compress.png" alt="09-pdf-compress, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>09-pdf-compress</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/10-background.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/10-background.png" alt="10-background, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>10-background</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/11-background-advanced.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/11-background-advanced.png" alt="11-background-advanced, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>11-background-advanced</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-merge.png" alt="12-dialog-merge, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-split.png" alt="12-dialog-split, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-organize.png" alt="12-dialog-organize, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-compress-pdf.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-compress-pdf.png" alt="12-dialog-compress-pdf, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-pdf</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/12-dialog-compress-images.png" alt="12-dialog-compress-images, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-images</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/13-control-states.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/13-control-states.png" alt="13-control-states, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>13-control-states</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-125/1120x700/14-image-compression-unchanged-copy.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-125/1120x700/14-image-compression-unchanged-copy.png" alt="14-image-compression-unchanged-copy, 1120x700, 125% offscreen scaling">
++</a>
++<figcaption>14-image-compression-unchanged-copy</figcaption>
++</figure>
++</div>
++</details>
++<details>
++<summary>150% offscreen scaling · 1380x860</summary>
++<h2>150% offscreen scaling · 1380x860</h2>
++<div class="grid">
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/01-empty.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/01-empty.png" alt="01-empty, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>01-empty</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/02-drag-over.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/02-drag-over.png" alt="02-drag-over, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>02-drag-over</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/03-single-type.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/03-single-type.png" alt="03-single-type, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>03-single-type</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/03-populated-mixed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/03-populated-mixed.png" alt="03-populated-mixed, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>03-populated-mixed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/04-row-selected.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/04-row-selected.png" alt="04-row-selected, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>04-row-selected</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/05-converting.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/05-converting.png" alt="05-converting, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>05-converting</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/06-completed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/06-completed.png" alt="06-completed, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>06-completed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/06-output-check.png" alt="06-output-check, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>06-output-check</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/07-error.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/07-error.png" alt="07-error, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>07-error</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/08-image-tools.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/08-image-tools.png" alt="08-image-tools, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>08-image-tools</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/09-pdf-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/09-pdf-merge.png" alt="09-pdf-merge, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>09-pdf-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/09-pdf-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/09-pdf-split.png" alt="09-pdf-split, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>09-pdf-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/09-pdf-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/09-pdf-organize.png" alt="09-pdf-organize, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>09-pdf-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/09-pdf-compress.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/09-pdf-compress.png" alt="09-pdf-compress, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>09-pdf-compress</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/10-background.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/10-background.png" alt="10-background, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>10-background</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/11-background-advanced.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/11-background-advanced.png" alt="11-background-advanced, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>11-background-advanced</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-merge.png" alt="12-dialog-merge, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-split.png" alt="12-dialog-split, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-organize.png" alt="12-dialog-organize, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-compress-pdf.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-compress-pdf.png" alt="12-dialog-compress-pdf, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-pdf</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/12-dialog-compress-images.png" alt="12-dialog-compress-images, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-images</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/13-control-states.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/13-control-states.png" alt="13-control-states, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>13-control-states</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1380x860/14-image-compression-unchanged-copy.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1380x860/14-image-compression-unchanged-copy.png" alt="14-image-compression-unchanged-copy, 1380x860, 150% offscreen scaling">
++</a>
++<figcaption>14-image-compression-unchanged-copy</figcaption>
++</figure>
++</div>
++</details>
++<details>
++<summary>150% offscreen scaling · 1120x700</summary>
++<h2>150% offscreen scaling · 1120x700</h2>
++<div class="grid">
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/01-empty.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/01-empty.png" alt="01-empty, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>01-empty</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/02-drag-over.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/02-drag-over.png" alt="02-drag-over, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>02-drag-over</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/03-single-type.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/03-single-type.png" alt="03-single-type, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>03-single-type</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/03-populated-mixed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/03-populated-mixed.png" alt="03-populated-mixed, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>03-populated-mixed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/04-row-selected.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/04-row-selected.png" alt="04-row-selected, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>04-row-selected</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/05-converting.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/05-converting.png" alt="05-converting, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>05-converting</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/06-completed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/06-completed.png" alt="06-completed, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>06-completed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/06-output-check.png" alt="06-output-check, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>06-output-check</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/07-error.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/07-error.png" alt="07-error, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>07-error</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/08-image-tools.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/08-image-tools.png" alt="08-image-tools, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>08-image-tools</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/09-pdf-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/09-pdf-merge.png" alt="09-pdf-merge, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>09-pdf-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/09-pdf-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/09-pdf-split.png" alt="09-pdf-split, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>09-pdf-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/09-pdf-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/09-pdf-organize.png" alt="09-pdf-organize, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>09-pdf-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/09-pdf-compress.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/09-pdf-compress.png" alt="09-pdf-compress, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>09-pdf-compress</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/10-background.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/10-background.png" alt="10-background, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>10-background</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/11-background-advanced.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/11-background-advanced.png" alt="11-background-advanced, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>11-background-advanced</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-merge.png" alt="12-dialog-merge, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-split.png" alt="12-dialog-split, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-organize.png" alt="12-dialog-organize, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-compress-pdf.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-compress-pdf.png" alt="12-dialog-compress-pdf, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-pdf</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/12-dialog-compress-images.png" alt="12-dialog-compress-images, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-images</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/13-control-states.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/13-control-states.png" alt="13-control-states, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>13-control-states</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-150/1120x700/14-image-compression-unchanged-copy.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-150/1120x700/14-image-compression-unchanged-copy.png" alt="14-image-compression-unchanged-copy, 1120x700, 150% offscreen scaling">
++</a>
++<figcaption>14-image-compression-unchanged-copy</figcaption>
++</figure>
++</div>
++</details>
++<details>
++<summary>200% offscreen scaling · 1380x860</summary>
++<h2>200% offscreen scaling · 1380x860</h2>
++<div class="grid">
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/01-empty.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/01-empty.png" alt="01-empty, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>01-empty</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/02-drag-over.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/02-drag-over.png" alt="02-drag-over, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>02-drag-over</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/03-single-type.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/03-single-type.png" alt="03-single-type, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>03-single-type</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/03-populated-mixed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/03-populated-mixed.png" alt="03-populated-mixed, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>03-populated-mixed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/04-row-selected.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/04-row-selected.png" alt="04-row-selected, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>04-row-selected</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/05-converting.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/05-converting.png" alt="05-converting, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>05-converting</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/06-completed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/06-completed.png" alt="06-completed, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>06-completed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/06-output-check.png" alt="06-output-check, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>06-output-check</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/07-error.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/07-error.png" alt="07-error, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>07-error</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/08-image-tools.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/08-image-tools.png" alt="08-image-tools, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>08-image-tools</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/09-pdf-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/09-pdf-merge.png" alt="09-pdf-merge, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>09-pdf-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/09-pdf-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/09-pdf-split.png" alt="09-pdf-split, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>09-pdf-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/09-pdf-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/09-pdf-organize.png" alt="09-pdf-organize, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>09-pdf-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/09-pdf-compress.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/09-pdf-compress.png" alt="09-pdf-compress, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>09-pdf-compress</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/10-background.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/10-background.png" alt="10-background, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>10-background</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/11-background-advanced.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/11-background-advanced.png" alt="11-background-advanced, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>11-background-advanced</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-merge.png" alt="12-dialog-merge, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-split.png" alt="12-dialog-split, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-organize.png" alt="12-dialog-organize, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-compress-pdf.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-compress-pdf.png" alt="12-dialog-compress-pdf, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-pdf</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/12-dialog-compress-images.png" alt="12-dialog-compress-images, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-images</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/13-control-states.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/13-control-states.png" alt="13-control-states, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>13-control-states</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1380x860/14-image-compression-unchanged-copy.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1380x860/14-image-compression-unchanged-copy.png" alt="14-image-compression-unchanged-copy, 1380x860, 200% offscreen scaling">
++</a>
++<figcaption>14-image-compression-unchanged-copy</figcaption>
++</figure>
++</div>
++</details>
++<details>
++<summary>200% offscreen scaling · 1120x700</summary>
++<h2>200% offscreen scaling · 1120x700</h2>
++<div class="grid">
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/01-empty.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/01-empty.png" alt="01-empty, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>01-empty</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/02-drag-over.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/02-drag-over.png" alt="02-drag-over, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>02-drag-over</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/03-single-type.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/03-single-type.png" alt="03-single-type, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>03-single-type</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/03-populated-mixed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/03-populated-mixed.png" alt="03-populated-mixed, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>03-populated-mixed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/04-row-selected.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/04-row-selected.png" alt="04-row-selected, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>04-row-selected</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/05-converting.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/05-converting.png" alt="05-converting, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>05-converting</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/06-completed.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/06-completed.png" alt="06-completed, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>06-completed</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/06-output-check.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/06-output-check.png" alt="06-output-check, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>06-output-check</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/07-error.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/07-error.png" alt="07-error, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>07-error</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/08-image-tools.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/08-image-tools.png" alt="08-image-tools, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>08-image-tools</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/09-pdf-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/09-pdf-merge.png" alt="09-pdf-merge, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>09-pdf-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/09-pdf-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/09-pdf-split.png" alt="09-pdf-split, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>09-pdf-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/09-pdf-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/09-pdf-organize.png" alt="09-pdf-organize, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>09-pdf-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/09-pdf-compress.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/09-pdf-compress.png" alt="09-pdf-compress, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>09-pdf-compress</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/10-background.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/10-background.png" alt="10-background, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>10-background</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/11-background-advanced.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/11-background-advanced.png" alt="11-background-advanced, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>11-background-advanced</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-merge.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-merge.png" alt="12-dialog-merge, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-merge</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-split.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-split.png" alt="12-dialog-split, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-split</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-organize.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-organize.png" alt="12-dialog-organize, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-organize</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-compress-pdf.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-compress-pdf.png" alt="12-dialog-compress-pdf, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-pdf</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-compress-images.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/12-dialog-compress-images.png" alt="12-dialog-compress-images, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>12-dialog-compress-images</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/13-control-states.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/13-control-states.png" alt="13-control-states, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>13-control-states</figcaption>
++</figure>
++<figure>
++<a href="../scratch/ui-ux-after-scale-200/1120x700/14-image-compression-unchanged-copy.png">
++<img loading="lazy" src="../scratch/ui-ux-after-scale-200/1120x700/14-image-compression-unchanged-copy.png" alt="14-image-compression-unchanged-copy, 1120x700, 200% offscreen scaling">
++</a>
++<figcaption>14-image-compression-unchanged-copy</figcaption>
++</figure>
++</div>
++</details>
++</html>

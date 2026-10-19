@@ -14,6 +14,7 @@ from image_converter.core.engine import (
     ConversionResult,
     ImageConverterEngine,
 )
+from image_converter.ui.metadata_evidence import inspect_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class BatchConversionWorker(QThread):
     # Signals
     file_started = Signal(int, str)  # (index, filename)
     file_completed = Signal(int, object)  # (index, ConversionResult)
+    metadata_inspected = Signal(int, object)  # (index, presentation-only evidence)
     progress_updated = Signal(int, int, int)  # (current, total, percentage)
     batch_finished = Signal(int, int, float, int, int)  # (success, failed, elapsed_sec, bytes_in, bytes_out)
     batch_cancelled = Signal()
@@ -76,6 +78,15 @@ class BatchConversionWorker(QThread):
 
             pct = int((completed_count / total_count) * 100) if total_count > 0 else 100
             self.file_completed.emit(task_idx, res)
+            if res.success:
+                config = self.tasks[task_idx][2]
+                image_targets = {"PNG", "JPG", "JPEG", "WEBP", "BMP", "TIFF"}
+                partial = (
+                    Path(res.input_path).suffix.lower() in {".pdf", ".doc", ".docx", ".pptx"}
+                    and config.target_format.upper() in image_targets
+                )
+                evidence = inspect_metadata(res.output_path, password=config.password, partial=partial)
+                self.metadata_inspected.emit(task_idx, evidence)
             self.progress_updated.emit(completed_count, total_count, pct)
 
         try:

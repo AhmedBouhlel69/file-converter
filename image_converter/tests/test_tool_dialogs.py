@@ -203,7 +203,8 @@ def test_compress_dialog_already_optimal_reports_no_reduction(qapp, tmp_path: Pa
     title, text = info_messages[0]
     assert title == "No Reduction Achieved"
     assert "No reduction was achieved" in text
-    assert "Original file preserved" in text
+    assert "An unchanged copy was saved" in text
+    assert "already optimal" not in text
     assert "Note: No reduction was achieved" in dlg.lbl_result.text()
 
 

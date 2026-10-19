@@ -170,7 +170,7 @@ class BackgroundRemovalPage(QFrame):
         set_eyebrow(eyebrow)
         title = QLabel("Background removal")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Create clean cutouts locally. Drop JPEG, PNG, WebP, BMP, or TIFF images here.")
+        subtitle = QLabel("Create cutouts locally. Drop JPEG, PNG, WebP, BMP, or TIFF images here.")
         subtitle.setObjectName("MutedLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(eyebrow)

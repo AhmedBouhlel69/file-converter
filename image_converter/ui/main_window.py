@@ -51,6 +51,7 @@ from image_converter.ui.tool_dialogs import (
     SplitDialog,
 )
 from image_converter.ui.worker import BatchConversionWorker
+from image_converter.ui.metadata_evidence import MetadataEvidence, metadata_check_summary
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,7 @@ class ImageConverterMainWindow(QMainWindow):
         self.privacy_badge.setObjectName("PrivacyBadge")
         self.privacy_badge.setCursor(Qt.CursorShape.ArrowCursor)
         self.privacy_badge.setAccessibleDescription("All file processing happens locally.")
+        self.privacy_badge.setToolTip("Files are processed on this device. The desktop conversion tools do not upload your files.")
         layout.addWidget(self.btn_add_files)
         layout.addWidget(self.btn_add_folder)
         layout.addWidget(self.privacy_badge)
@@ -387,13 +389,20 @@ class ImageConverterMainWindow(QMainWindow):
         copy.setSpacing(2)
         self.lbl_status = QLabel("0 files · 0 B → —")
         self.lbl_status.setObjectName("StatusLabel")
-        self.lbl_status_hint = QLabel("Your originals are never overwritten.")
+        self.lbl_status_hint = QLabel("Output: same folder as each source. Existing destination files may be replaced.")
         self.lbl_status_hint.setObjectName("MutedLabel")
+        self.lbl_status_hint.setWordWrap(True)
+        self.lbl_metadata_result = QLabel()
+        self.lbl_metadata_result.setObjectName("MutedLabel")
+        self.lbl_metadata_result.setWordWrap(True)
+        self.lbl_metadata_result.setAccessibleName("Output metadata summary")
+        self.lbl_metadata_result.hide()
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
         self.progress_bar.hide()
         copy.addWidget(self.lbl_status)
         copy.addWidget(self.lbl_status_hint)
+        copy.addWidget(self.lbl_metadata_result)
         copy.addWidget(self.progress_bar)
         layout.addLayout(copy, stretch=1)
 
@@ -525,6 +534,9 @@ class ImageConverterMainWindow(QMainWindow):
 
     def _on_table_row_selected(self, file_path: str):
         self.preview_widget.set_image(file_path)
+        entry = next((item for item in self.queue_table.queue_model.entries if item.path == Path(file_path)), None)
+        if entry:
+            self.preview_widget.set_output_evidence(entry.output_path, entry.metadata_evidence)
         self.inspector_stack.setCurrentIndex(1)
         self.btn_remove_item.setEnabled(not self._is_converting)
 
@@ -564,12 +576,18 @@ class ImageConverterMainWindow(QMainWindow):
         estimate = f"~{format_bytes(estimated_total)}" if estimated_total is not None else "—"
         if background_busy and not self._is_converting:
             self.lbl_status.setText("Background removal is running")
-            self.lbl_status_hint.setText("One processing job runs at a time to reduce resource use.")
+            self.lbl_status_hint.setText("Conversion waits until background removal finishes.")
         elif update_status and self._footer_state == "ready" and not self._is_converting:
             self.lbl_status.setText(
                 f"{total} file{'s' if total != 1 else ''} · {format_bytes(input_total)} → {estimate}"
             )
-            self.lbl_status_hint.setText("Your originals are never overwritten.")
+            output_dir = self.settings_widget.get_output_directory()
+            destination = str(output_dir) if output_dir else "same folder as each source"
+            self.lbl_status_hint.setText(f"Output: {destination}. Existing destination files may be replaced.")
+
+        evidence = [entry.metadata_evidence for entry in model.entries if entry.metadata_evidence is not None]
+        self.lbl_metadata_result.setText(metadata_check_summary(evidence))
+        self.lbl_metadata_result.setVisible(bool(evidence))
 
         if hasattr(self.settings_widget, "set_queue_context"):
             compatible_formats = model.compatible_format_intersection()
@@ -607,7 +625,7 @@ class ImageConverterMainWindow(QMainWindow):
         self.undo_toast.hide()
         self._refresh_queue_ui()
         if not added and file_paths:
-            self.lbl_status_hint.setText("Those files are already in the queue or are unsupported.")
+            self.lbl_status_hint.setText("No new files were added. Check the selected paths and queue for duplicates.")
 
     add_files = add_images
 
@@ -749,6 +767,10 @@ class ImageConverterMainWindow(QMainWindow):
             model.update_status(row, "Queued", progress=0)
             model.entry(row).output_size = None
             model.entry(row).error = ""
+            model.entry(row).output_path = None
+            model.entry(row).metadata_evidence = None
+            if self.preview_widget.current_file_path == model.entry(row).path:
+                self.preview_widget.set_output_evidence(None, None)
         model.update_status(rows[0], "Converting", progress=0)
 
         self._is_converting = True
@@ -762,11 +784,13 @@ class ImageConverterMainWindow(QMainWindow):
         self.btn_convert_all.setText("Cancel conversion")
         set_variant(self.btn_convert_all, "danger")
         self.lbl_status.setText(f"Converting 0 of {len(tasks)} files")
-        self.lbl_status_hint.setText("Cancel stops after the current file finishes.")
+        self.lbl_status_hint.setText("Cancellation skips work that has not started. Running files finish first.")
+        self.lbl_metadata_result.hide()
 
         self.worker = BatchConversionWorker(tasks, self.engine)
         self.worker.file_started.connect(self._on_file_started)
         self.worker.file_completed.connect(self._on_file_completed)
+        self.worker.metadata_inspected.connect(self._on_metadata_inspected)
         self.worker.progress_updated.connect(self._on_progress_updated)
         self.worker.batch_finished.connect(self._on_batch_finished)
         self.worker.batch_cancelled.connect(self._on_batch_cancelled)
@@ -788,6 +812,9 @@ class ImageConverterMainWindow(QMainWindow):
         row = self._active_rows[worker_index]
         model = self.queue_table.queue_model
         if result.success:
+            entry = model.entry(row)
+            if entry:
+                entry.output_path = Path(result.output_path) if result.output_path else None
             model.update_status(
                 row,
                 "Warning" if result.error_message else "Done",
@@ -802,6 +829,20 @@ class ImageConverterMainWindow(QMainWindow):
                 progress=0,
                 error=result.error_message or "Conversion failed. Review the file and retry.",
             )
+
+    def _on_metadata_inspected(self, worker_index: int, evidence: MetadataEvidence):
+        if not (0 <= worker_index < len(self._active_rows)):
+            return
+        row = self._active_rows[worker_index]
+        entry = self.queue_table.queue_model.entry(row)
+        if entry is None:
+            return
+        entry.metadata_evidence = evidence
+        if self.preview_widget.current_file_path == entry.path:
+            self.preview_widget.set_output_evidence(entry.output_path, evidence)
+        results = [item.metadata_evidence for item in self.queue_table.queue_model.entries if item.metadata_evidence is not None]
+        self.lbl_metadata_result.setText(metadata_check_summary(results))
+        self.lbl_metadata_result.setVisible(bool(results))
 
     def _on_progress_updated(self, current: int, total: int, percentage: int):
         self.progress_bar.setValue(percentage)
@@ -834,7 +875,7 @@ class ImageConverterMainWindow(QMainWindow):
         self.lbl_status_hint.setText(
             "Select a failed status to retry."
             if fail_count
-            else f"Completed in {elapsed_sec:.2f}s. Your originals were not changed."
+            else f"Completed in {elapsed_sec:.2f}s. Select a row to review its output metadata check."
         )
         self._refresh_queue_ui(update_status=False)
 
@@ -862,7 +903,7 @@ class ImageConverterMainWindow(QMainWindow):
             self.worker.cancel()
             self.btn_convert_all.setEnabled(False)
             self.btn_convert_all.setText("Cancelling…")
-            self.lbl_status.setText("Cancelling after the current file…")
+            self.lbl_status.setText("Cancelling after running files finish…")
 
     def _convert_more(self):
         self._footer_state = "ready"

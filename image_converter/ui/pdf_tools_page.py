@@ -28,7 +28,7 @@ class PdfToolsPage(QFrame):
             "Merge",
             "Combine files into one PDF",
             "Arrange PDFs and images in the exact order you want, then export a single document.",
-            ("PDF and image inputs", "Drag-friendly ordering", "One combined output"),
+            ("PDF and image inputs", "Move files up or down", "One combined output"),
             "Open merge workspace",
             "merge_requested",
         ),
@@ -44,15 +44,15 @@ class PdfToolsPage(QFrame):
             "Organize",
             "Rebuild page order visually",
             "Preview pages, move them, rotate them, duplicate them, or remove them before saving.",
-            ("Page thumbnails", "Reorder and rotate", "Non-destructive save"),
+            ("Page thumbnails", "Reorder and rotate", "Choose an output PDF"),
             "Open page organizer",
             "organize_requested",
         ),
         (
             "Compress",
-            "Reduce PDF file size",
-            "Choose a balanced, maximum, or lossless profile and see the achieved reduction.",
-            ("Three compression profiles", "Original stays untouched", "Clear savings report"),
+            "Try a smaller PDF",
+            "Choose a compression profile and see the measured result. Savings vary by PDF.",
+            ("Three compression profiles", "Choose an output PDF", "Measured savings report"),
             "Open compression workspace",
             "compress_requested",
         ),
@@ -69,7 +69,7 @@ class PdfToolsPage(QFrame):
         set_eyebrow(eyebrow)
         title = QLabel("PDF tools")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Choose a focused workflow. Your existing PDF engine and output behavior stay unchanged.")
+        subtitle = QLabel("Merge, split, organize or compress PDFs on this device.")
         subtitle.setObjectName("MutedLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(eyebrow)

@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw
 from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QGridLayout, QLabel, QSpinBox,
+    QApplication, QCheckBox, QDialog, QGridLayout, QLabel, QMessageBox, QSpinBox,
 )
 
 from image_converter.ui.main_window import ImageConverterMainWindow
@@ -134,7 +134,7 @@ def capture_states(output_dir: Path, width: int = 1380, height: int = 860) -> li
     window.progress_bar.setValue(36)
     window.progress_bar.show()
     window.lbl_status.setText(f"Converting 1 of {model.rowCount()} files · 36%")
-    window.lbl_status_hint.setText("Cancel stops after the current file finishes.")
+    window.lbl_status_hint.setText("Cancellation skips work that has not started. Running files finish first.")
     window._refresh_queue_ui(update_status=False)
     capture("05-converting")
 
@@ -153,7 +153,14 @@ def capture_states(output_dir: Path, width: int = 1380, height: int = 860) -> li
     if any(entry.status not in ("Done", "Warning") for entry in model.entries):
         raise RuntimeError("A sample conversion failed; completed captures must use real outputs")
     capture("06-completed")
+    window.queue_table.selectRow(0)
+    capture("06-output-check")
+    window._show_batch_settings()
 
+    failed_entry = model.entry(0)
+    failed_entry.output_size = None
+    failed_entry.output_path = None
+    failed_entry.metadata_evidence = None
     model.update_status(0, "Failed", progress=0, error="The sample file could not be decoded.")
     window._footer_state = "partial_failure"
     window.btn_open_folder.setVisible(model.rowCount() > 1)
@@ -179,14 +186,56 @@ def capture_states(output_dir: Path, width: int = 1380, height: int = 860) -> li
     QThreadPool.globalInstance().waitForDone(3000)
     app.processEvents()
     captured.extend(capture_dialogs(output_dir, samples, width, height))
+    captured.append(capture_image_compression_result(output_dir, samples[0], width, height))
     (output_dir / "manifest.json").write_text(json.dumps({
         "logical_size": [width, height],
         "platform": app.platformName(),
+        "device_pixel_ratio": window.devicePixelRatioF(),
         "captures": [path.name for path in captured],
         "fixtures": "Running and failure queue states are layout fixtures. Completed sizes come from a real sample batch.",
         "native_windows_dpi_or_assistive_technology_verified": False,
     }, indent=2), encoding="utf-8")
     return captured
+
+
+def capture_image_compression_result(output_dir: Path, image_path: Path, width: int, height: int) -> Path:
+    """Exercise the real original-copy fallback and capture its evidence before closing."""
+    source = output_dir / "samples" / "already-small.jpg"
+    exif = Image.Exif()
+    exif[315] = "Sample author"
+    with Image.open(image_path) as image:
+        image.convert("RGB").save(source, quality=5, optimize=True, exif=exif)
+    dialog = ImageCompressDialog(initial_files=[source])
+    dialog.resize(width, height)
+    dialog.combo_format.setCurrentText("Keep original format")
+    dialog.txt_output_dir.setText(str(output_dir / "compression-outputs"))
+    dialog.show()
+    destination = output_dir / "14-image-compression-unchanged-copy.png"
+    original_information = QMessageBox.information
+    original_critical = QMessageBox.critical
+
+    def save_result(*_args, **_kwargs):
+        _settle(QApplication.instance())
+        if "unchanged" not in dialog.lbl_result.text().lower():
+            raise RuntimeError("Compression fixture did not exercise the original-copy fallback")
+        if not dialog.grab().save(str(destination)):
+            raise RuntimeError(f"Could not save {destination}")
+        return QMessageBox.StandardButton.Ok
+
+    def fail_result(_parent, title, detail, *_args, **_kwargs):
+        raise RuntimeError(f"{title}: {detail}")
+
+    try:
+        QMessageBox.information = save_result
+        QMessageBox.critical = fail_result
+        dialog._execute_compress()
+    finally:
+        QMessageBox.information = original_information
+        QMessageBox.critical = original_critical
+        dialog.close()
+    if not destination.exists():
+        raise RuntimeError("Compression result was not captured")
+    return destination
 
 
 def capture_dialogs(output_dir: Path, samples: list[Path], width: int, height: int) -> list[Path]:
