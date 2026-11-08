@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,20 @@ def export(
             os.replace(temporary, target)
         else:
             # Hard-link publication is atomic and fails if the destination already exists.
-            os.link(temporary, target)
+            # Filesystems without hard links (FAT/exFAT, some shares) use exclusive creation.
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                raise
+            except OSError:
+                with open(target, "xb") as destination:
+                    try:
+                        with open(temporary, "rb") as source:
+                            shutil.copyfileobj(source, destination, 1024 * 1024)
+                    except BaseException:
+                        destination.close()
+                        target.unlink(missing_ok=True)
+                        raise
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

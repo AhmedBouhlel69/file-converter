@@ -5,6 +5,7 @@ Supports HEIC, JPG, PNG, WEBP, BMP, TIFF, GIF, ICO, PDF, DOCX, XLSX, CSV, TXT, J
 
 from __future__ import annotations
 
+import html
 import logging
 import os
 import tempfile
@@ -190,6 +191,12 @@ def get_image_metadata(file_path: str | Path) -> Dict[str, any]:
     file_size = path.stat().st_size
     with Image.open(path) as img:
         width, height = img.size
+        try:
+            # Report the size the picture is shown at (EXIF-rotated phone photos).
+            if img.getexif().get(0x0112) in (5, 6, 7, 8):
+                width, height = height, width
+        except Exception:
+            pass
         img_format = img.format or path.suffix.lstrip(".").upper()
         mode = img.mode
         has_alpha = mode in ("RGBA", "LA", "PA") or (
@@ -242,6 +249,9 @@ class ConversionConfig:
     max_workers: Optional[int] = None  # Worker threads for batch conversion
     max_file_size: int = 500 * 1024 * 1024  # Max allowed input file size (default 500MB)
     strip_metadata: bool = False  # Strip all personal, device, and tracking metadata
+    ocr_language: str = "auto"  # Tesseract language(s), e.g. "eng", "eng+fra"; "auto" = English + installed extras
+    reencode: bool = False  # True: always re-encode same-format images (compression), even when stripping metadata
+    png_palette: str = "auto"  # "auto": lossless 8-bit palette when <=256 colours; "reduce": 256-colour quantise; "off"
 
     def __post_init__(self):
         if self.strip_metadata:
@@ -265,6 +275,207 @@ class ConversionResult:
     output_size_bytes: int = 0
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
+
+
+
+# ---------------------------------------------------------------------------
+# Image fidelity helpers
+# ---------------------------------------------------------------------------
+_SRGB_PROFILE = None
+
+
+def _srgb_profile():
+    global _SRGB_PROFILE
+    if _SRGB_PROFILE is None:
+        from PIL import ImageCms
+        _SRGB_PROFILE = ImageCms.createProfile("sRGB")
+    return _SRGB_PROFILE
+
+
+def _to_8bit(img: Image.Image) -> Image.Image:
+    """Scale 16/32-bit and float images to 8-bit instead of clipping to white."""
+    if img.mode in ("I;16", "I;16L", "I;16B", "I;16N", "I"):
+        import numpy as np
+        arr = np.asarray(img)
+        if img.mode.startswith("I;16") or (arr.size and int(arr.max()) > 255):
+            arr = arr.astype(np.float32) / 257.0
+        return Image.fromarray(np.clip(np.rint(arr), 0, 255).astype(np.uint8), "L")
+    if img.mode == "F":
+        import numpy as np
+        arr = np.asarray(img, dtype=np.float32)
+        finite = arr[np.isfinite(arr)]
+        if finite.size and float(finite.max()) <= 1.0 and float(finite.min()) >= 0.0:
+            arr = arr * 255.0
+        return Image.fromarray(np.clip(np.nan_to_num(np.rint(arr)), 0, 255).astype(np.uint8), "L")
+    if img.mode == "1":
+        return img.convert("L")
+    return img
+
+
+def _profile_space(icc: bytes) -> str:
+    try:
+        import io as _io
+        from PIL import ImageCms
+        return ImageCms.ImageCmsProfile(_io.BytesIO(icc)).profile.xcolor_space.strip().upper()
+    except Exception:
+        return ""
+
+
+def _profile_is_srgb(icc: bytes) -> bool:
+    try:
+        import io as _io
+        from PIL import ImageCms
+        name = ImageCms.getProfileDescription(ImageCms.ImageCmsProfile(_io.BytesIO(icc))) or ""
+        return "srgb" in name.lower().replace(" ", "")
+    except Exception:
+        return False
+
+
+def _apply_color_profile(img: Image.Image, icc: Optional[bytes], target: str, strip: bool):
+    """Return ``(image, icc_to_embed)`` so colours look the same after conversion.
+
+    CMYK is converted through its embedded profile (or Pillow's default) for
+    every target except TIFF. RGB/grey profiles are embedded again where the
+    output format supports them; otherwise (GIF, BMP, ICO, PDF) or when
+    metadata is stripped, pixels are converted to sRGB so they still look right.
+    """
+    import io as _io
+
+    keeps_cmyk = target == "TIFF"
+    embeds = target in ("JPG", "JPEG", "PNG", "WEBP", "TIFF", "HEIC", "HEIF")
+    space = _profile_space(icc) if icc else ""
+
+    if img.mode == "CMYK" and not keeps_cmyk:
+        if icc and space == "CMYK":
+            try:
+                from PIL import ImageCms
+                converted = ImageCms.profileToProfile(
+                    img, _io.BytesIO(icc), _srgb_profile(), outputMode="RGB",
+                    renderingIntent=ImageCms.Intent.PERCEPTUAL,
+                )
+                if converted is not None:
+                    return converted, None
+            except Exception as exc:
+                logger.warning("CMYK profile conversion failed, using default: %s", exc)
+        return img.convert("RGB"), None
+
+    if not icc:
+        return img, None
+    rgb_like = img.mode in ("RGB", "RGBA") and space == "RGB"
+    gray_like = img.mode in ("L", "LA") and space == "GRAY"
+    cmyk_like = img.mode == "CMYK" and space == "CMYK"
+    if not (rgb_like or gray_like or cmyk_like):
+        return img, None
+    if embeds and not strip:
+        return img, icc
+    if rgb_like and not _profile_is_srgb(icc):
+        try:
+            from PIL import ImageCms
+            converted = ImageCms.profileToProfile(img, _io.BytesIO(icc), _srgb_profile(), outputMode=img.mode)
+            if converted is not None:
+                return converted, None
+        except Exception as exc:
+            logger.warning("Colour profile conversion to sRGB failed: %s", exc)
+    return img, None
+
+
+def _has_alpha(img: Image.Image) -> bool:
+    return img.mode in ("RGBA", "LA", "PA", "RGBa", "La") or (img.mode == "P" and "transparency" in img.info)
+
+
+def _to_gif_frame(img: Image.Image) -> Image.Image:
+    """Quantise to a 256-colour palette with dithering, keeping transparency."""
+    img = _to_8bit(img)
+    if img.mode == "P":
+        return img
+    if img.mode == "L":
+        return img
+    if _has_alpha(img):
+        rgba = img.convert("RGBA")
+        paletted = rgba.convert("RGB").quantize(colors=255, dither=Image.Dither.FLOYDSTEINBERG)
+        palette = (paletted.getpalette() or [])[: 255 * 3]
+        palette += [0] * (255 * 3 - len(palette)) + [0, 0, 0]
+        paletted.putpalette(palette)
+        hidden = rgba.getchannel("A").point(lambda a: 255 if a < 128 else 0)
+        paletted.paste(255, mask=hidden)
+        paletted.info["transparency"] = 255
+        return paletted
+    return img.convert("RGB").quantize(colors=256, dither=Image.Dither.FLOYDSTEINBERG)
+
+
+def _exact_palette(img: Image.Image) -> Optional[Image.Image]:
+    """Lossless 8-bit palette version of an image with at most 256 colours."""
+    import numpy as np
+
+    if img.mode not in ("RGB", "RGBA", "L", "LA"):
+        return None
+    rgba = np.asarray(img.convert("RGBA"))
+    flat = rgba.reshape(-1, 4)
+    packed = flat.view(np.uint32).reshape(-1)
+    colours, inverse = np.unique(packed, return_inverse=True)
+    if len(colours) > 256:
+        return None
+    entries = colours.view(np.uint8).reshape(-1, 4)
+    indexed = Image.fromarray(inverse.reshape(rgba.shape[:2]).astype(np.uint8), "L")
+    paletted = indexed.convert("P")
+    paletted.putpalette(entries[:, :3].reshape(-1).tolist())
+    alphas = entries[:, 3]
+    if (alphas < 255).any():
+        paletted.info["transparency"] = bytes(alphas.tolist())
+    return paletted
+
+
+def _reduced_palette(img: Image.Image) -> Image.Image:
+    """Lossy 256-colour palette with dithering (pngquant-style); keeps alpha."""
+    from PIL import features
+
+    if _has_alpha(img):
+        rgba = img.convert("RGBA")
+        method = Image.Quantize.LIBIMAGEQUANT if features.check("libimagequant") else Image.Quantize.FASTOCTREE
+        return rgba.quantize(colors=256, method=method, dither=Image.Dither.FLOYDSTEINBERG)
+    rgb = img.convert("RGB")
+    method = Image.Quantize.LIBIMAGEQUANT if features.check("libimagequant") else Image.Quantize.MEDIANCUT
+    return rgb.quantize(colors=256, method=method, dither=Image.Dither.FLOYDSTEINBERG)
+
+
+def _png_palette(img: Image.Image, mode: str) -> Image.Image:
+    """Apply the PNG palette policy: "auto" (lossless only), "reduce" (lossy), "off"."""
+    if mode == "off" or img.mode in ("P", "1", "I", "I;16") or img.mode.startswith("I;"):
+        return img
+    exact = _exact_palette(img)
+    if exact is not None:
+        return exact
+    if mode == "reduce":
+        return _reduced_palette(img)
+    return img
+
+
+def _mode_for_target(img: Image.Image, target: str, background, engine) -> Image.Image:
+    """Convert an image to a mode the target format can store without damage."""
+    if target in ("JPG", "JPEG", "BMP", "PDF"):
+        img = _to_8bit(img)
+        if img.mode == "L":
+            return img
+        return engine.composite_alpha(img, background)
+    if target == "PNG":
+        if img.mode in ("1", "L", "LA", "P", "RGB", "RGBA", "I;16", "I"):
+            return img
+        img = _to_8bit(img)
+        return img.convert("RGBA" if _has_alpha(img) else "RGB")
+    if target in ("WEBP", "HEIC", "HEIF"):
+        img = _to_8bit(img)
+        if img.mode in ("RGB", "RGBA"):
+            return img
+        return img.convert("RGBA" if _has_alpha(img) else "RGB")
+    if target == "TIFF":
+        if img.mode in ("1", "L", "LA", "P", "RGB", "RGBA", "CMYK", "I;16", "I", "F"):
+            return img
+        return _to_8bit(img).convert("RGBA" if _has_alpha(img) else "RGB")
+    if target == "GIF":
+        return _to_gif_frame(img)
+    if target == "ICO":
+        return _to_8bit(img).convert("RGBA")
+    return img
 
 
 class ImageConverterEngine:
@@ -358,7 +569,8 @@ class ImageConverterEngine:
         bg_color: Tuple[int, int, int] = (255, 255, 255),
     ) -> Image.Image:
         """Composite image with alpha onto a solid background color."""
-        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        img = _to_8bit(img)
+        if img.mode in ("RGBA", "LA", "PA") or (img.mode == "P" and "transparency" in img.info):
             img_rgba = img.convert("RGBA")
             bg = Image.new("RGBA", img_rgba.size, (*bg_color, 255))
             alpha_composited = Image.alpha_composite(bg, img_rgba)
@@ -473,7 +685,11 @@ class ImageConverterEngine:
         # Direct metadata stripping / sanitation without format change
         if (
             target_fmt_upper in ("STRIP_METADATA", "CLEAN")
-            or (config.strip_metadata and (in_ext == out_p.suffix.lower() or target_fmt_upper == in_ext.lstrip(".").upper()))
+            or (
+                config.strip_metadata
+                and not config.reencode
+                and (in_ext == out_p.suffix.lower() or target_fmt_upper == in_ext.lstrip(".").upper())
+            )
         ):
             from ..metadata.engine import strip_file_metadata
             strip_res = strip_file_metadata(in_p, out_p, password=config.password)
@@ -500,6 +716,7 @@ class ImageConverterEngine:
             # -----------------------------------------------------------------
             if in_ext == ".pdf":
                 in_format = "PDF"
+                self.doc_converter.last_table_warning = None
                 if target_fmt_upper in ("PNG", "JPG", "JPEG", "WEBP", "BMP", "TIFF"):
                     files = self.doc_converter.convert_pdf_to_images(
                         in_p,
@@ -515,19 +732,17 @@ class ImageConverterEngine:
                     )
                 elif target_fmt_upper == "TXT":
                     final_out = self.doc_converter.convert_pdf_to_text(
-                        in_p, out_p, password=config.password, enable_ocr=config.enable_ocr
+                        in_p, out_p, password=config.password, enable_ocr=config.enable_ocr,
+                        ocr_language=config.ocr_language,
                     )
                 elif target_fmt_upper in ("CSV", "XLSX"):
                     final_out = self.doc_converter.convert_pdf_to_tables(
                         in_p, out_p, target_format=target_fmt_upper, password=config.password
                     )
                 elif target_fmt_upper == "PPTX":
-                    return ConversionResult(
-                        success=False,
-                        input_path=str(in_p),
-                        output_path=str(out_p),
-                        duration_seconds=time.perf_counter() - t_start,
-                        error_message="Direct PDF to PowerPoint conversion is not supported without layout loss.",
+                    final_out = self.doc_converter.convert_pdf_to_pptx(in_p, out_p, password=config.password)
+                    self.doc_converter.last_table_warning = (
+                        "Each page is a picture on its own slide (text is in the speaker notes), so slides are not editable as text."
                     )
                 else:
                     return ConversionResult(
@@ -704,15 +919,20 @@ class ImageConverterEngine:
             # -----------------------------------------------------------------
             elif in_ext == ".txt":
                 in_format = "TXT"
-                content = in_p.read_text(encoding="utf-8", errors="ignore")
+                from ..text_io import read_text_file, xml_safe
+                content = read_text_file(in_p)
                 if target_fmt_upper == "PDF":
                     final_out = self.rich_converter._text_to_pdf(content, out_p, title=in_p.stem)
                 elif target_fmt_upper == "DOCX":
                     import docx
+                    from docx.shared import Pt
                     d = docx.Document()
-                    for line in content.splitlines():
-                        if line.strip():
-                            d.add_paragraph(line.strip())
+                    normal = d.styles["Normal"]
+                    normal.paragraph_format.space_after = Pt(0)
+                    normal.paragraph_format.space_before = Pt(0)
+                    for line in xml_safe(content).split("\n"):
+                        # Keep indentation and blank lines exactly as written.
+                        d.add_paragraph(line.replace("\t", "    "))
                     d.save(str(out_p))
                     final_out = out_p
                 elif target_fmt_upper == "PPTX":
@@ -720,8 +940,14 @@ class ImageConverterEngine:
                 elif target_fmt_upper == "RTF":
                     final_out = self.rich_converter.convert_text_to_rtf(in_p, out_p)
                 elif target_fmt_upper == "HTML":
-                    safe_body = html.escape(content).replace("\n", "<br>\n")
-                    html_str = f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(in_p.stem)}</title></head><body style='font-family:sans-serif;line-height:1.6;padding:20px;max-width:800px;margin:auto;'><pre>{safe_body}</pre></body></html>"
+                    html_str = (
+                        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                        f"<title>{html.escape(in_p.stem)}</title></head>"
+                        "<body style='font-family:sans-serif;line-height:1.6;padding:20px;max-width:900px;margin:auto;'>"
+                        f"<pre dir='auto' style='white-space:pre-wrap;word-wrap:break-word;font-family:inherit'>{html.escape(content)}</pre>"
+                        "</body></html>"
+                    )
                     out_p.write_text(html_str, encoding="utf-8")
                     final_out = out_p
                 else:
@@ -780,6 +1006,7 @@ class ImageConverterEngine:
             # -----------------------------------------------------------------
             elif in_ext in (".xlsx", ".xls"):
                 in_format = in_ext.lstrip(".").upper()
+                self.data_converter.last_warning = None
                 if target_fmt_upper == "CSV":
                     final_out = self.data_converter.convert_excel_to_csv(
                         in_p, out_p, sheet_name=config.sheet_name
@@ -812,6 +1039,7 @@ class ImageConverterEngine:
                     target_fmt_upper=target_fmt_upper,
                     input_size=input_size,
                     t_start=t_start,
+                    warning_message=self.data_converter.last_warning,
                 )
 
             # -----------------------------------------------------------------
@@ -883,7 +1111,7 @@ class ImageConverterEngine:
                                 if dy > 0:
                                     dpi_y = dy
                         except (ValueError, TypeError) as dpi_err:
-                            logger.warning(f"Malformed DPI metadata {raw_dpi!r} in image '{img_p.name}': {dpi_err}. Defaulting to (96.0, 96.0).")
+                            logger.warning(f"Malformed DPI metadata {raw_dpi!r} in image '{in_p.name}': {dpi_err}. Defaulting to (96.0, 96.0).")
                             dpi_x, dpi_y = 96.0, 96.0
 
                     # Natural dimensions in EMUs (1 inch = 914,400 EMUs)
@@ -913,8 +1141,10 @@ class ImageConverterEngine:
                 elif target_fmt_upper == "TXT":
                     in_format = in_p.suffix.lstrip(".").upper()
                     from ..ocr.engine import ocr_image_to_text
-                    extracted_text = ocr_image_to_text(in_p)
-                    out_p.write_text(extracted_text, encoding="utf-8")
+                    extracted_text = ocr_image_to_text(in_p, lang=config.ocr_language)
+                    if not extracted_text.strip():
+                        raise ValueError("No text was found in this image.")
+                    out_p.write_text(extracted_text + "\n", encoding="utf-8")
                     final_out = out_p
                     return self._verify_and_create_result(
                         in_p=in_p,
@@ -947,112 +1177,159 @@ class ImageConverterEngine:
                 with Image.open(in_p) as src_img:
                     in_format = src_img.format or in_p.suffix.lstrip(".").upper()
                     orig_w, orig_h = src_img.size
-
-                    # Auto-orient based on EXIF tag if requested
-                    orientation_warning = None
-                    if config.auto_orient:
-                        try:
-                            work_img = ImageOps.exif_transpose(src_img)
-                        except Exception as orient_err:
-                            work_img = src_img.copy()
-                            orientation_warning = f"Auto-orientation failed for '{in_p.name}': {orient_err}. Preserved original orientation."
-                            logger.warning(orientation_warning, exc_info=True)
-                    else:
-                        work_img = src_img.copy()
-
-                    if work_img is None:
-                        work_img = src_img.copy()
-
-                    # Preserve EXIF bytes if requested and present
-                    exif_data = None
-                    if config.preserve_metadata:
-                        exif_data = work_img.info.get("exif")
-
-                    # Resize if necessary
-                    target_w, target_h = self.calculate_dimensions(
-                        work_img.width, work_img.height, config
+                    frame_count = getattr(src_img, "n_frames", 1) or 1
+                    animated = bool(getattr(src_img, "is_animated", False)) and frame_count > 1
+                    keep_frames = (
+                        (animated and target_fmt_upper in ("GIF", "WEBP", "PNG"))
+                        or (frame_count > 1 and in_format == "TIFF" and target_fmt_upper in ("TIFF", "PDF"))
                     )
-                    if (target_w, target_h) != (work_img.width, work_img.height):
-                        work_img = work_img.resize(
-                            (target_w, target_h),
-                            resample=Image.Resampling.LANCZOS,
-                        )
+                    icc = src_img.info.get("icc_profile") or None
+                    sampling = -1
+                    if in_format == "JPEG":
+                        try:
+                            from PIL import JpegImagePlugin
+                            sampling = JpegImagePlugin.get_sampling(src_img)
+                        except Exception:
+                            sampling = -1
 
-                    out_w, out_h = work_img.size
+                    orientation_warning = None
+                    exif_data = None
+                    if keep_frames:
+                        frames, durations = [], []
+                        for index in range(frame_count):
+                            src_img.seek(index)
+                            frame = src_img.copy()
+                            if animated:
+                                frame = frame.convert("RGBA")
+                            frames.append(frame)
+                            durations.append(int(src_img.info.get("duration", 100) or 100))
+                        src_img.seek(0)
+                    else:
+                        if config.auto_orient:
+                            try:
+                                work_img = ImageOps.exif_transpose(src_img)
+                            except Exception as orient_err:
+                                work_img = None
+                                orientation_warning = f"Auto-orientation failed for '{in_p.name}': {orient_err}. Preserved original orientation."
+                                logger.warning(orientation_warning, exc_info=True)
+                            if work_img is None or work_img is src_img:
+                                work_img = src_img.copy()
+                        else:
+                            work_img = src_img.copy()
+                        if config.preserve_metadata:
+                            exif_data = work_img.info.get("exif")
+                        frames, durations = [work_img], []
+                    loop = src_img.info.get("loop", 0)
+                    source_dpi = src_img.info.get("dpi")
 
-                    # Save options per target format
-                    save_kwargs = {}
+                prepared = []
+                out_icc = None
+                for frame in frames:
+                    frame, out_icc = _apply_color_profile(frame, icc, target_fmt_upper, config.strip_metadata)
+                    target_w, target_h = self.calculate_dimensions(frame.width, frame.height, config)
+                    if (target_w, target_h) != frame.size:
+                        frame = _to_8bit(frame) if frame.mode in ("I", "F") else frame
+                        frame = frame.resize((target_w, target_h), resample=Image.Resampling.LANCZOS)
+                    frame = _mode_for_target(frame, target_fmt_upper, config.background_color, self)
+                    if target_fmt_upper == "PNG" and len(frames) == 1:
+                        frame = _png_palette(frame, config.png_palette)
+                    # Pillow re-embeds profiles/EXIF found in .info for some formats;
+                    # only what we pass explicitly below may be written.
+                    if frame is src_img:
+                        frame = frame.copy()
+                    frame.info.pop("icc_profile", None)
+                    frame.info.pop("exif", None)
+                    if config.strip_metadata:
+                        # Comments, XMP and Photoshop/IPTC blocks can carry names and places.
+                        frame.info = {
+                            key: value for key, value in frame.info.items()
+                            if key in ("transparency", "dpi", "duration", "loop", "background")
+                        }
+                    prepared.append(frame)
+                work_img = prepared[0]
+                out_w, out_h = work_img.size
 
-                    if target_fmt_upper in ("JPG", "JPEG"):
-                        work_img = self.composite_alpha(work_img, config.background_color)
-                        save_kwargs["quality"] = max(1, min(100, config.quality))
-                        save_kwargs["optimize"] = True
-                        save_kwargs["progressive"] = True
-                        if exif_data:
-                            save_kwargs["exif"] = exif_data
+                save_kwargs: Dict[str, object] = {}
+                if out_icc and target_fmt_upper in ("JPG", "JPEG", "PNG", "WEBP", "TIFF", "HEIC", "HEIF"):
+                    save_kwargs["icc_profile"] = out_icc
 
-                    elif target_fmt_upper == "PNG":
-                        if work_img.mode not in ("RGB", "RGBA", "L", "LA"):
-                            work_img = work_img.convert("RGBA")
-                        save_kwargs["optimize"] = True
-                        save_kwargs["compress_level"] = 6
-                        if exif_data:
-                            save_kwargs["exif"] = exif_data
+                if target_fmt_upper in ("JPG", "JPEG"):
+                    quality = max(1, min(100, config.quality))
+                    save_kwargs["quality"] = quality
+                    save_kwargs["optimize"] = True
+                    save_kwargs["progressive"] = True
+                    # Keep the source's chroma sampling; full-resolution colour
+                    # at high quality keeps text and red edges crisp.
+                    save_kwargs["subsampling"] = sampling if sampling >= 0 else (0 if quality >= 90 else 2)
+                    if exif_data:
+                        save_kwargs["exif"] = exif_data
+                elif target_fmt_upper == "PNG":
+                    save_kwargs["optimize"] = work_img.size[0] * work_img.size[1] <= 4_000_000
+                    if work_img.mode == "P" and "transparency" in work_img.info:
+                        save_kwargs["transparency"] = work_img.info["transparency"]
+                    save_kwargs["compress_level"] = 6
+                    if exif_data:
+                        save_kwargs["exif"] = exif_data
+                elif target_fmt_upper == "WEBP":
+                    save_kwargs["quality"] = max(1, min(100, config.quality))
+                    save_kwargs["lossless"] = config.lossless
+                    save_kwargs["method"] = 6 if work_img.size[0] * work_img.size[1] <= 12_000_000 else 4
+                    if exif_data:
+                        save_kwargs["exif"] = exif_data
+                elif target_fmt_upper in ("HEIC", "HEIF"):
+                    save_kwargs["quality"] = max(1, min(100, config.quality))
+                    if exif_data:
+                        save_kwargs["exif"] = exif_data
+                elif target_fmt_upper == "TIFF":
+                    if config.tiff_compression != "none":
+                        compression = config.tiff_compression
+                        if compression == "tiff_jpeg" and work_img.mode not in ("RGB", "L", "CMYK"):
+                            compression = "tiff_deflate"
+                        save_kwargs["compression"] = compression
+                    if exif_data:
+                        save_kwargs["exif"] = exif_data
+                elif target_fmt_upper == "GIF":
+                    if "transparency" in work_img.info:
+                        save_kwargs["transparency"] = work_img.info["transparency"]
+                elif target_fmt_upper == "ICO":
+                    save_kwargs["sizes"] = [s for s in config.ico_sizes if s[0] <= max(out_w, out_h) * 4] or [config.ico_sizes[0]]
+                elif target_fmt_upper == "PDF":
+                    resolution = 100.0
+                    if isinstance(source_dpi, (tuple, list)) and source_dpi and float(source_dpi[0] or 0) >= 50:
+                        resolution = float(source_dpi[0])
+                    save_kwargs["resolution"] = resolution
 
-                    elif target_fmt_upper == "WEBP":
-                        if work_img.mode not in ("RGB", "RGBA"):
-                            work_img = work_img.convert("RGBA")
-                        save_kwargs["quality"] = max(1, min(100, config.quality))
-                        save_kwargs["lossless"] = config.lossless
-                        save_kwargs["method"] = 6
-                        if exif_data:
-                            save_kwargs["exif"] = exif_data
+                if len(prepared) > 1:
+                    save_kwargs["save_all"] = True
+                    save_kwargs["append_images"] = prepared[1:]
+                    if target_fmt_upper in ("GIF", "WEBP", "PNG"):
+                        save_kwargs["duration"] = durations
+                        save_kwargs["loop"] = loop
+                        if target_fmt_upper == "GIF":
+                            save_kwargs["disposal"] = 2
+                            save_kwargs.pop("transparency", None)
 
-                    elif target_fmt_upper in ("HEIC", "HEIF"):
-                        if work_img.mode not in ("RGB", "RGBA"):
-                            work_img = work_img.convert("RGB")
-                        save_kwargs["quality"] = max(1, min(100, config.quality))
-                        if exif_data:
-                            save_kwargs["exif"] = exif_data
-
-                    elif target_fmt_upper == "BMP":
-                        work_img = self.composite_alpha(work_img, config.background_color)
-
-                    elif target_fmt_upper == "TIFF":
-                        if config.tiff_compression != "none":
-                            save_kwargs["compression"] = config.tiff_compression
-                        if exif_data:
-                            save_kwargs["exif"] = exif_data
-
-                    elif target_fmt_upper == "GIF":
-                        if work_img.mode not in ("P", "L"):
-                            work_img = work_img.convert("P", palette=Image.Palette.ADAPTIVE)
-
-                    elif target_fmt_upper == "ICO":
-                        if work_img.mode != "RGBA":
-                            work_img = work_img.convert("RGBA")
-                        save_kwargs["sizes"] = config.ico_sizes
-
-                    elif target_fmt_upper == "PDF":
-                        work_img = self.composite_alpha(work_img, config.background_color)
-                        save_kwargs["resolution"] = 100.0
-
-                    # Atomic save
+                # Atomic save
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=out_p.parent,
+                        prefix=f".{out_p.stem}-",
+                        suffix=out_p.suffix,
+                        delete=False,
+                    ) as temp_file:
+                        temp_path = Path(temp_file.name)
+                    work_img.save(temp_path, format=pillow_fmt, **save_kwargs)
+                    os.replace(temp_path, out_p)
                     temp_path = None
-                    try:
-                        with tempfile.NamedTemporaryFile(
-                            dir=out_p.parent,
-                            prefix=f".{out_p.stem}-",
-                            suffix=out_p.suffix,
-                            delete=False,
-                        ) as temp_file:
-                            temp_path = Path(temp_file.name)
-                        work_img.save(temp_path, format=pillow_fmt, **save_kwargs)
-                        os.replace(temp_path, out_p)
-                        temp_path = None
-                    finally:
-                        if temp_path and temp_path.exists():
-                            temp_path.unlink()
+                finally:
+                    if temp_path and temp_path.exists():
+                        temp_path.unlink()
+
+                warning = orientation_warning
+                if frame_count > 1 and not keep_frames and target_fmt_upper not in ("ICO",):
+                    note = f"Only the first of {frame_count} frames was converted; {target_fmt_upper} holds a single image."
+                    warning = f"{warning} {note}" if warning else note
 
                 return self._verify_and_create_result(
                     in_p=in_p,
@@ -1063,7 +1340,7 @@ class ImageConverterEngine:
                     output_dimensions=(out_w, out_h),
                     input_size=input_size,
                     t_start=t_start,
-                    warning_message=orientation_warning,
+                    warning_message=warning,
                 )
 
         except Exception as e:

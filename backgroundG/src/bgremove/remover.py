@@ -74,6 +74,21 @@ class Remover:
         return get_engine(self.path, self.config, self.device, self.strict, self.threads)
 
     def _predict(
+        self,
+        engine: Engine,
+        rgb: NDArray[np.uint8],
+        timings: dict[str, float],
+        tta: bool = False,
+    ) -> NDArray[np.float32]:
+        mask = self._predict_once(engine, rgb, timings)
+        if tta:
+            # Averaging the prediction for the mirrored image cancels much of the
+            # model's left/right bias and steadies uncertain edges. Costs 2x time.
+            mirrored = self._predict_once(engine, np.ascontiguousarray(rgb[:, ::-1]), timings)
+            mask = np.asarray((mask + mirrored[:, ::-1]) * np.float32(0.5), dtype=np.float32)
+        return mask
+
+    def _predict_once(
         self, engine: Engine, rgb: NDArray[np.uint8], timings: dict[str, float]
     ) -> NDArray[np.float32]:
         start = perf_counter()
@@ -95,6 +110,7 @@ class Remover:
         composition: ComposeOptions | None = None,
         two_pass: bool = False,
         matting: bool | None = None,
+        tta: bool = False,
     ) -> Result:
         from dataclasses import replace
 
@@ -110,12 +126,15 @@ class Remover:
         start = perf_counter()
         engine = self.warmup()
         timings["session"] = perf_counter() - start
-        mask = self._predict(engine, loaded.rgb, timings)
+        extra = {"tta": True} if tta else {}
+        mask = self._predict(engine, loaded.rgb, timings, **extra)
         if two_pass:
             box = subject_box(mask, margin=0.1)
             if box is not None and box != (0, 0, loaded.rgb.shape[1], loaded.rgb.shape[0]):
                 left, top, right, bottom = box
-                cropped = self._predict(engine, loaded.rgb[top:bottom, left:right], timings)
+                cropped = self._predict(
+                    engine, loaded.rgb[top:bottom, left:right], timings, **extra
+                )
                 mask = np.zeros_like(mask)
                 mask[top:bottom, left:right] = cropped
         start = perf_counter()

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import fitz  # PyMuPDF
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -276,7 +276,7 @@ class MergeDialog(QDialog):
                 QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
             )
             if reply == QMessageBox.StandardButton.Open:
-                os.startfile(str(Path(out_path).parent))
+                _open_folder(Path(str(Path(out_path).parent)))
             self.accept()
         except Exception as exc:
             QMessageBox.critical(self, "Merge Failed", f"An error occurred while merging:\n{str(exc)}")
@@ -453,7 +453,7 @@ class SplitDialog(QDialog):
                 QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
             )
             if reply == QMessageBox.StandardButton.Open:
-                os.startfile(out_dir)
+                _open_folder(Path(out_dir))
             self.accept()
         except Exception as exc:
             QMessageBox.critical(self, "Split Failed", f"An error occurred while splitting:\n{str(exc)}")
@@ -661,7 +661,7 @@ class OrganizePagesDialog(QDialog):
                 QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
             )
             if reply == QMessageBox.StandardButton.Open:
-                os.startfile(str(Path(out_f).parent))
+                _open_folder(Path(str(Path(out_f).parent)))
             self.accept()
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", f"Could not save reorganized PDF:\n{str(exc)}")
@@ -676,6 +676,49 @@ class OrganizePagesDialog(QDialog):
 # 4. COMPRESS DIALOG
 # ===========================================================================
 
+class _ImageCompressWorker(QThread):
+    """Runs image compression off the GUI thread so the window stays responsive."""
+
+    item_done = Signal(int, object)  # row, result dict
+
+    def __init__(self, engine, tasks, parent=None):
+        super().__init__(parent)
+        self.engine = engine
+        self.tasks = tasks  # (row, source, destination, config)
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        for row, source, destination, config in self.tasks:
+            if self._stop:
+                break
+            outcome = {"source": source, "destination": destination, "ok": False}
+            try:
+                result = self.engine.convert_single(source, destination, config)
+                if not result.success:
+                    outcome["error"] = result.error_message or "compression failed"
+                else:
+                    source_size = source.stat().st_size
+                    output_size = destination.stat().st_size
+                    unchanged = False
+                    if source.suffix.lower() == destination.suffix.lower() and output_size > source_size:
+                        shutil.copy2(source, destination)
+                        output_size = destination.stat().st_size
+                        unchanged = True
+                    outcome.update(
+                        ok=True,
+                        source_size=source_size,
+                        output_size=output_size,
+                        unchanged=unchanged,
+                        evidence=inspect_metadata(destination).output_text,
+                    )
+            except Exception as exc:
+                outcome["error"] = str(exc)
+            self.item_done.emit(row, outcome)
+
+
 class ImageCompressDialog(QDialog):
     """Compress one or more images through the standard conversion engine."""
 
@@ -688,11 +731,13 @@ class ImageCompressDialog(QDialog):
         super().__init__(parent)
         apply_dialog_theme(self)
         self.setWindowTitle("Compress Images")
-        self.resize(680, 540)
-        self.setMinimumSize(560, 430)
+        self.resize(760, 640)
+        self.setMinimumSize(600, 520)
 
         self.files: List[Path] = []
         self.engine = UniversalConverterEngine()
+        self._worker: Optional[_ImageCompressWorker] = None
+        self._outcomes: List[dict] = []
         self._init_ui()
         if initial_files:
             self.add_files(initial_files)
@@ -710,11 +755,13 @@ class ImageCompressDialog(QDialog):
         layout.addWidget(header)
         layout.addWidget(sub)
 
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["File", "Type", "Size"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["File", "Type", "Size", "Result"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setMinimumHeight(150)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(self.table, stretch=1)
@@ -785,6 +832,14 @@ class ImageCompressDialog(QDialog):
         self.chk_strip_metadata.setChecked(True)
         options_layout.addWidget(self.chk_strip_metadata)
 
+        self.chk_png_palette = QCheckBox("Smaller PNGs: reduce to 256 colours (best for screenshots and graphics)")
+        self.chk_png_palette.setToolTip(
+            "PNG output only. Uses a 256-colour palette with dithering, often 50-70% smaller. "
+            "Images that already have 256 colours or fewer are always stored losslessly."
+        )
+        self.chk_png_palette.setChecked(True)
+        options_layout.addWidget(self.chk_png_palette)
+
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("Output folder:"))
         self.txt_output_dir = QLineEdit()
@@ -800,6 +855,12 @@ class ImageCompressDialog(QDialog):
         self.lbl_result.setProperty("state", "success")
         self.lbl_result.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_result)
+
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("%v of %m")
+        self.progress.hide()
+        layout.addWidget(self.progress)
 
         bottom = QHBoxLayout()
         self.lbl_status = QLabel("0 images selected")
@@ -874,35 +935,34 @@ class ImageCompressDialog(QDialog):
             return suffix.lstrip(".").upper()
         return selected
 
-    def _destination_for(self, source: Path, target_format: str) -> Path:
+    def _destination_for(self, source: Path, target_format: str, reserved: Optional[set] = None) -> Path:
         out_dir_text = self.txt_output_dir.text().strip()
         out_dir = Path(out_dir_text) if out_dir_text else source.parent
         out_dir.mkdir(parents=True, exist_ok=True)
         ext = FORMAT_EXTENSIONS.get(target_format, source.suffix.lower()) or source.suffix.lower()
+        reserved = reserved if reserved is not None else set()
         candidate = out_dir / f"{source.stem}_compressed{ext}"
         counter = 2
-        while candidate.exists():
+        while candidate.exists() or str(candidate).casefold() in reserved:
             candidate = out_dir / f"{source.stem}_compressed_{counter}{ext}"
             counter += 1
+        reserved.add(str(candidate).casefold())
         return candidate
 
     def _execute_compress(self):
+        if self.is_running:
+            return
         if not self.files:
             QMessageBox.warning(self, "No Images", "Please add at least one image to compress.")
             return
 
-        successes = 0
-        failures: List[str] = []
-        input_total = 0
-        output_total = 0
-        last_output_dir: Optional[Path] = None
-        output_checks: List[str] = []
-        unchanged_copies = 0
-
-        for source in self.files:
+        tasks = []
+        reserved: set = set()
+        preflight_failures: List[str] = []
+        for row, source in enumerate(self.files):
             try:
                 target_format = self._target_for(source)
-                destination = self._destination_for(source, target_format)
+                destination = self._destination_for(source, target_format, reserved)
                 config = ConversionConfig(
                     target_format=target_format,
                     quality=self.slider_quality.value(),
@@ -913,29 +973,114 @@ class ImageCompressDialog(QDialog):
                     custom_width=self.spin_max_width.value() if self.chk_resize.isChecked() else None,
                     custom_height=self.spin_max_height.value() if self.chk_resize.isChecked() else None,
                     keep_aspect_ratio=True,
+                    png_palette="reduce" if self.chk_png_palette.isChecked() else "auto",
+                    reencode=True,
                 )
-                result = self.engine.convert_single(source, destination, config)
-                if not result.success:
-                    failures.append(f"{source.name}: {result.error_message or 'compression failed'}")
-                    continue
-
-                source_size = source.stat().st_size
-                output_size = destination.stat().st_size
-                same_format = source.suffix.lower() == destination.suffix.lower()
-                if same_format and output_size > source_size:
-                    shutil.copy2(source, destination)
-                    output_size = destination.stat().st_size
-                    unchanged_copies += 1
-
-                evidence = inspect_metadata(destination)
-                output_checks.append(f"{destination.name}: {evidence.output_text}")
-
-                successes += 1
-                input_total += source_size
-                output_total += output_size
-                last_output_dir = destination.parent
+                tasks.append((row, source, destination, config))
+                self._set_row_result(row, "Waiting…")
             except Exception as exc:
-                failures.append(f"{source.name}: {exc}")
+                preflight_failures.append(f"{source.name}: {exc}")
+                self._set_row_result(row, "Failed")
+
+        self._outcomes = [{"ok": False, "error": message} for message in preflight_failures]
+        self.progress.setRange(0, max(1, len(tasks)))
+        self.progress.setValue(0)
+        self.progress.show()
+        self._set_running(True)
+        self.lbl_result.setText("")
+        self._worker = _ImageCompressWorker(self.engine, tasks, self)
+        self._worker.item_done.connect(self._on_item_done)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.start()
+
+    @property
+    def is_running(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def wait_until_done(self, timeout_ms: int = 120000) -> None:
+        """Block until the batch finishes (used by tests and on close)."""
+        from PySide6.QtCore import QCoreApplication, QElapsedTimer
+
+        timer = QElapsedTimer()
+        timer.start()
+        while self._worker is not None and timer.elapsed() < timeout_ms:
+            QCoreApplication.processEvents()
+            if self._worker is not None:
+                self._worker.wait(20)
+        QCoreApplication.processEvents()
+
+    def _set_running(self, running: bool) -> None:
+        for widget in (self.btn_add, self.btn_remove, self.btn_clear, self.combo_format, self.slider_quality,
+                       self.chk_resize, self.spin_max_width, self.spin_max_height, self.chk_strip_metadata,
+                       self.chk_png_palette,
+                       self.txt_output_dir, self.btn_compress):
+            widget.setEnabled(not running)
+        self.btn_cancel.setText("Stop" if running else "Cancel")
+        self.btn_compress.setText("Compressing…" if running else "Compress Images")
+
+    def _set_row_result(self, row: int, text: str, tooltip: str = "") -> None:
+        if 0 <= row < self.table.rowCount():
+            item = QTableWidgetItem(text)
+            if tooltip:
+                item.setToolTip(tooltip)
+            self.table.setItem(row, 3, item)
+
+    def _on_item_done(self, row: int, outcome: dict) -> None:
+        self._outcomes.append(outcome)
+        if outcome.get("ok"):
+            before, after = outcome["source_size"], outcome["output_size"]
+            change = (before - after) / before * 100 if before else 0.0
+            label = "Unchanged copy" if outcome.get("unchanged") else (
+                f"{format_bytes(after)} (−{change:.0f}%)" if change >= 0 else f"{format_bytes(after)} (+{-change:.0f}%)"
+            )
+            self._set_row_result(row, label, str(outcome["destination"]))
+        else:
+            self._set_row_result(row, "Failed", outcome.get("error", ""))
+        self.progress.setValue(self.progress.value() + 1)
+
+    def reject(self):
+        if self.is_running:
+            # First press stops the batch; finished files are kept.
+            self._worker.stop()
+            self.btn_cancel.setEnabled(False)
+            self.btn_cancel.setText("Stopping…")
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self.is_running:
+            self._worker.stop()
+            self._worker.wait(30000)
+        super().closeEvent(event)
+
+    def _on_worker_finished(self) -> None:
+        worker, self._worker = self._worker, None
+        stopped = bool(worker and worker._stop)
+        if worker is not None:
+            worker.deleteLater()
+        self._set_running(False)
+        self.btn_cancel.setEnabled(True)
+        self.progress.hide()
+
+        successes = 0
+        failures: List[str] = []
+        input_total = 0
+        output_total = 0
+        last_output_dir: Optional[Path] = None
+        output_checks: List[str] = []
+        unchanged_copies = 0
+        for outcome in self._outcomes:
+            if not outcome.get("ok"):
+                if "error" in outcome:
+                    name = outcome["source"].name if "source" in outcome else ""
+                    failures.append(f"{name}: {outcome['error']}" if name else outcome["error"])
+                continue
+            successes += 1
+            input_total += outcome["source_size"]
+            output_total += outcome["output_size"]
+            unchanged_copies += 1 if outcome.get("unchanged") else 0
+            output_checks.append(f"{outcome['destination'].name}: {outcome['evidence']}")
+            last_output_dir = outcome["destination"].parent
 
         if successes:
             saved = input_total - output_total
@@ -945,6 +1090,8 @@ class ImageCompressDialog(QDialog):
                 f"{successes} output{'s' if successes != 1 else ''} saved · {format_bytes(input_total)} -> "
                 f"{format_bytes(output_total)} ({change})"
             )
+            if stopped:
+                msg += "\nStopped before the remaining images were processed."
             if unchanged_copies:
                 msg += (
                     f"\n{unchanged_copies} unchanged cop{'y' if unchanged_copies == 1 else 'ies'} saved because "
@@ -955,7 +1102,12 @@ class ImageCompressDialog(QDialog):
             if len(output_checks) > 5:
                 msg += f"\n{len(output_checks) - 5} additional output checks are not shown here."
             msg += "\nMetadata checks cover supported fields only."
-            self.lbl_result.setText(f"Complete: {msg}")
+            # Keep the label short so the file list stays visible; the full
+            # per-file metadata check is in the tooltip and the summary dialog.
+            short = msg.split("\nMetadata checks")[0]
+            short_lines = [line for line in short.split("\n") if not line.startswith(tuple(f"{c['destination'].name}:" for c in self._outcomes if c.get("ok")))]
+            self.lbl_result.setText("Complete: " + "\n".join(short_lines))
+            self.lbl_result.setToolTip(msg)
             self.lbl_result.setWordWrap(True)
             self.lbl_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
             self.lbl_result.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -966,7 +1118,7 @@ class ImageCompressDialog(QDialog):
             )
             self.setTabOrder(self.btn_compress, self.lbl_result)
             self.setTabOrder(self.lbl_result, self.btn_cancel)
-            self.lbl_result.setProperty("state", "warning" if failures or unchanged_copies or saved < 0 else "success")
+            self.lbl_result.setProperty("state", "warning" if failures or unchanged_copies or saved < 0 or stopped else "success")
             repolish(self.lbl_result)
             detail = msg
             if failures:
@@ -978,8 +1130,12 @@ class ImageCompressDialog(QDialog):
                 QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
             )
             if reply == QMessageBox.StandardButton.Open and last_output_dir:
-                os.startfile(str(last_output_dir))
+                _open_folder(last_output_dir)
             self.accept()
+        elif stopped and not failures:
+            self.lbl_result.setText("Stopped. No images were compressed.")
+            self.lbl_result.setProperty("state", "warning")
+            repolish(self.lbl_result)
         else:
             self.lbl_result.setText("Compression failed")
             self.lbl_result.setProperty("state", "danger")
@@ -989,6 +1145,14 @@ class ImageCompressDialog(QDialog):
                 "Image Compression Failed",
                 "Could not compress the selected images:\n" + "\n".join(failures[:8]),
             )
+
+
+def _open_folder(folder: Path) -> None:
+    """Open a folder in the system file manager (Explorer, Finder, ...)."""
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
 
 class CompressDialog(QDialog):
@@ -1136,7 +1300,265 @@ class CompressDialog(QDialog):
                     QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
                 )
             if reply == QMessageBox.StandardButton.Open:
-                os.startfile(str(Path(out_f).parent))
+                _open_folder(Path(str(Path(out_f).parent)))
             self.accept()
         except Exception as exc:
             QMessageBox.critical(self, "Compression Failed", f"Could not compress PDF:\n{str(exc)}")
+
+
+class _SinglePdfDialog(QDialog):
+    """Shared layout: choose one PDF, set options, save a new copy beside it."""
+
+    TITLE = ""
+    SUBTITLE = ""
+    ACTION = ""
+    SUFFIX = ""
+
+    def __init__(self, initial_file: Optional[Path] = None, parent=None):
+        super().__init__(parent)
+        apply_dialog_theme(self)
+        self.setWindowTitle(self.TITLE)
+        self.resize(540, 420)
+        self.pdf_file: Optional[Path] = None
+        self.last_output: Optional[Path] = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+        header = QLabel(self.TITLE)
+        header.setObjectName("HeaderLabel")
+        sub = QLabel(self.SUBTITLE)
+        sub.setObjectName("MutedLabel")
+        sub.setWordWrap(True)
+        layout.addWidget(header)
+        layout.addWidget(sub)
+
+        card = QFrame()
+        card.setObjectName("InnerCard")
+        card_layout = QHBoxLayout(card)
+        self.lbl_file = QLabel("No PDF selected")
+        self.lbl_file.setObjectName("SectionTitle")
+        self.lbl_size = QLabel("-")
+        self.lbl_size.setObjectName("MutedLabel")
+        browse = QPushButton("Choose PDF...")
+        browse.clicked.connect(self._browse_file)
+        card_layout.addWidget(self.lbl_file, stretch=1)
+        card_layout.addWidget(self.lbl_size)
+        card_layout.addWidget(browse)
+        layout.addWidget(card)
+
+        self.options = QFrame()
+        self.options.setObjectName("InnerCard")
+        self.options_layout = QVBoxLayout(self.options)
+        self.options_layout.setSpacing(10)
+        self._build_options(self.options_layout)
+        layout.addWidget(self.options)
+
+        self.lbl_result = QLabel("")
+        self.lbl_result.setWordWrap(True)
+        self.lbl_result.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.lbl_result)
+        layout.addStretch()
+
+        bar = QHBoxLayout()
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_run = QPushButton(self.ACTION)
+        set_variant(self.btn_run, "primary")
+        self.btn_run.clicked.connect(self._execute)
+        bar.addStretch()
+        bar.addWidget(self.btn_cancel)
+        bar.addWidget(self.btn_run)
+        layout.addLayout(bar)
+        self._after_build()
+        if initial_file:
+            self._load_file(Path(initial_file))
+
+    def _build_options(self, layout: QVBoxLayout) -> None:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def _load_file(self, path: Path) -> None:
+        self.pdf_file = path
+        self.lbl_file.setText(path.name)
+        self.lbl_size.setText(format_bytes(path.stat().st_size) if path.exists() else "-")
+        self._file_loaded(path)
+
+    def _file_loaded(self, path: Path) -> None:
+        pass
+
+    def _after_build(self) -> None:
+        pass
+
+    def _browse_file(self):
+        chosen, _ = QFileDialog.getOpenFileName(self, f"Select PDF – {self.TITLE}", "", "PDF Document (*.pdf)")
+        if chosen:
+            self._load_file(Path(chosen))
+
+    def _output_path(self, suffix: Optional[str] = None) -> Path:
+        from image_converter.ui.main_window import unique_destination
+
+        assert self.pdf_file is not None
+        return unique_destination(self.pdf_file.with_name(f"{self.pdf_file.stem}_{suffix or self.SUFFIX}.pdf"))
+
+    def _show_error(self, message: str) -> None:
+        self.lbl_result.setText(message)
+        self.lbl_result.setProperty("state", "danger")
+        repolish(self.lbl_result)
+
+    def _finish(self, output: Path, message: str) -> None:
+        self.last_output = output
+        self.lbl_result.setText(f"Saved {output.name}")
+        self.lbl_result.setProperty("state", "success")
+        repolish(self.lbl_result)
+        reply = QMessageBox.information(
+            self, self.TITLE, f"{message}\n\nSaved to:\n{output}\n\nOpen output folder?",
+            QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
+        )
+        if reply == QMessageBox.StandardButton.Open:
+            _open_folder(output.parent)
+        self.accept()
+
+    def _execute(self):
+        if not self.pdf_file or not self.pdf_file.is_file():
+            self._show_error("Choose a PDF first.")
+            return
+        try:
+            output, message = self._run(self.pdf_file)
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
+        self._finish(output, message)
+
+    def _run(self, source: Path):  # pragma: no cover - abstract
+        raise NotImplementedError
+
+
+class ProtectDialog(_SinglePdfDialog):
+    """Add a password to a PDF, or remove one you know."""
+
+    TITLE = "Protect PDF"
+    SUBTITLE = "Lock a PDF with a password (AES-256), or save an unlocked copy. The original file is not changed."
+    ACTION = "Save copy"
+    SUFFIX = "protected"
+
+    def _build_options(self, layout: QVBoxLayout) -> None:
+        self.rb_add = QRadioButton("Add a password")
+        self.rb_remove = QRadioButton("Remove the password (you need to know it)")
+        self.rb_add.setChecked(True)
+        group = QButtonGroup(self)
+        group.addButton(self.rb_add)
+        group.addButton(self.rb_remove)
+        layout.addWidget(self.rb_add)
+        layout.addWidget(self.rb_remove)
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Password:"), 0, 0)
+        self.txt_password = QLineEdit()
+        self.txt_password.setEchoMode(QLineEdit.EchoMode.Password)
+        grid.addWidget(self.txt_password, 0, 1)
+        self.lbl_confirm = QLabel("Confirm:")
+        grid.addWidget(self.lbl_confirm, 1, 0)
+        self.txt_confirm = QLineEdit()
+        self.txt_confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        grid.addWidget(self.txt_confirm, 1, 1)
+        layout.addLayout(grid)
+        self.chk_print = QCheckBox("Allow printing")
+        self.chk_print.setChecked(True)
+        self.chk_copy = QCheckBox("Allow copying text and images")
+        self.chk_copy.setChecked(True)
+        self.chk_print.setToolTip("Permissions are respected by standard PDF readers; they are not a security boundary.")
+        self.chk_copy.setToolTip(self.chk_print.toolTip())
+        layout.addWidget(self.chk_print)
+        layout.addWidget(self.chk_copy)
+        self.rb_add.toggled.connect(self._mode_changed)
+
+    def _after_build(self) -> None:
+        self._mode_changed()
+
+    def _mode_changed(self, *_args) -> None:
+        adding = self.rb_add.isChecked()
+        for widget in (self.lbl_confirm, self.txt_confirm, self.chk_print, self.chk_copy):
+            widget.setVisible(adding)
+        self.btn_run.setText("Save protected copy" if adding else "Save unlocked copy")
+
+    def _file_loaded(self, path: Path) -> None:
+        try:
+            with fitz.open(str(path)) as doc:
+                if doc.needs_pass:
+                    self.rb_remove.setChecked(True)
+        except Exception:
+            pass
+
+    def _run(self, source: Path):
+        from image_converter.core.pdf.tools import protect_pdf, unlock_pdf
+
+        password = self.txt_password.text()
+        if self.rb_add.isChecked():
+            if not password:
+                raise ValueError("Enter a password.")
+            if password != self.txt_confirm.text():
+                raise ValueError("The passwords do not match.")
+            output = self._output_path("protected")
+            protect_pdf(
+                source, output, password,
+                allow_printing=self.chk_print.isChecked(), allow_copying=self.chk_copy.isChecked(),
+            )
+            return output, "The copy needs the password to open. Keep it safe: it cannot be recovered."
+        output = self._output_path("unlocked")
+        unlock_pdf(source, output, password)
+        return output, "The copy opens without a password."
+
+
+class PageNumbersDialog(_SinglePdfDialog):
+    """Stamp page numbers onto a copy of a PDF."""
+
+    TITLE = "Add Page Numbers"
+    SUBTITLE = "Number the pages of a copy of your PDF. The original file is not changed."
+    ACTION = "Add page numbers"
+    SUFFIX = "numbered"
+
+    POSITIONS = (
+        ("Bottom centre", "bottom-center"), ("Bottom right", "bottom-right"), ("Bottom left", "bottom-left"),
+        ("Top centre", "top-center"), ("Top right", "top-right"), ("Top left", "top-left"),
+    )
+    STYLES = (("1 / 10", "n / total"), ("1", "n"), ("Page 1", "Page n"), ("Page 1 of 10", "Page n of total"))
+
+    def _build_options(self, layout: QVBoxLayout) -> None:
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Position:"), 0, 0)
+        self.combo_position = QComboBox()
+        for label, value in self.POSITIONS:
+            self.combo_position.addItem(label, value)
+        grid.addWidget(self.combo_position, 0, 1)
+        grid.addWidget(QLabel("Format:"), 1, 0)
+        self.combo_style = QComboBox()
+        for label, value in self.STYLES:
+            self.combo_style.addItem(label, value)
+        grid.addWidget(self.combo_style, 1, 1)
+        grid.addWidget(QLabel("Start at:"), 2, 0)
+        self.spin_start = QSpinBox()
+        self.spin_start.setRange(0, 100000)
+        self.spin_start.setValue(1)
+        grid.addWidget(self.spin_start, 2, 1)
+        grid.addWidget(QLabel("Text size:"), 3, 0)
+        self.spin_size = QSpinBox()
+        self.spin_size.setRange(6, 36)
+        self.spin_size.setValue(10)
+        self.spin_size.setSuffix(" pt")
+        grid.addWidget(self.spin_size, 3, 1)
+        layout.addLayout(grid)
+        self.chk_skip_first = QCheckBox("Don't number the first page (cover)")
+        layout.addWidget(self.chk_skip_first)
+
+    def _run(self, source: Path):
+        from image_converter.core.pdf.tools import add_page_numbers
+
+        output = self._output_path()
+        add_page_numbers(
+            source,
+            output,
+            position=self.combo_position.currentData(),
+            style=self.combo_style.currentData(),
+            start=self.spin_start.value(),
+            font_size=float(self.spin_size.value()),
+            skip_first=self.chk_skip_first.isChecked(),
+        )
+        return output, "Page numbers were added."

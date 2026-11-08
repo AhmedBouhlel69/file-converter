@@ -22,6 +22,8 @@ class PdfToolsPage(QFrame):
     split_requested = Signal()
     organize_requested = Signal()
     compress_requested = Signal()
+    protect_requested = Signal()
+    numbers_requested = Signal()
 
     TOOLS = (
         (
@@ -56,6 +58,22 @@ class PdfToolsPage(QFrame):
             "Open compression workspace",
             "compress_requested",
         ),
+        (
+            "Protect",
+            "Add or remove a password",
+            "Lock a PDF with AES-256 so it needs a password to open, or save an unlocked copy of a PDF whose password you know.",
+            ("AES-256 encryption", "Optional print and copy limits", "Unlock with your password"),
+            "Open password tool",
+            "protect_requested",
+        ),
+        (
+            "Page numbers",
+            "Number every page",
+            "Stamp page numbers in a corner or centre, in the format you choose. Rotated pages are numbered upright.",
+            ("Six positions", "1, 1 / 10, Page 1 of 10", "Start number and skip the cover"),
+            "Open page numbering",
+            "numbers_requested",
+        ),
     )
 
     def __init__(self, parent=None):
@@ -69,7 +87,7 @@ class PdfToolsPage(QFrame):
         set_eyebrow(eyebrow)
         title = QLabel("PDF tools")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Merge, split, organize or compress PDFs on this device.")
+        subtitle = QLabel("Merge, split, organize, compress, protect or number PDFs on this device. Drop files here to open the selected tool.")
         subtitle.setObjectName("MutedLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(eyebrow)

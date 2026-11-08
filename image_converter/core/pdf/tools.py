@@ -16,7 +16,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import fitz  # PyMuPDF
 from PIL import Image
@@ -781,4 +781,161 @@ def extract_pages(
     new_doc.save(str(out_p), garbage=4, deflate=True)
     new_doc.close()
     doc.close()
+    return str(out_p)
+
+
+# ---------------------------------------------------------------------------
+# Security: add or remove a password
+# ---------------------------------------------------------------------------
+
+def _save_atomically(doc, out_p: Path, **save_kwargs) -> None:
+    temp = out_p.with_name(f".tmp_pdf_{os.getpid()}_{time.time_ns()}_{out_p.name}")
+    try:
+        doc.save(str(temp), **save_kwargs)
+        os.replace(temp, out_p)
+    finally:
+        if temp.exists():
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+
+
+def protect_pdf(
+    pdf_path: Union[str, Path],
+    output_path: Union[str, Path],
+    password: str,
+    owner_password: Optional[str] = None,
+    allow_printing: bool = True,
+    allow_copying: bool = True,
+    allow_editing: bool = False,
+) -> str:
+    """Encrypt a PDF with AES-256 so it needs ``password`` to open.
+
+    The owner password (a random one if not given) controls the permissions;
+    note that permissions are honoured by well-behaved readers, not enforced.
+    """
+    if not password:
+        raise ValueError("Enter a password to protect the PDF.")
+    src_p = Path(pdf_path).resolve()
+    out_p = Path(output_path).resolve()
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open(str(src_p))
+    try:
+        if doc.needs_pass:
+            raise ValueError(f"'{src_p.name}' already has a password. Remove it first.")
+        permissions = fitz.PDF_PERM_ACCESSIBILITY
+        if allow_printing:
+            permissions |= fitz.PDF_PERM_PRINT | fitz.PDF_PERM_PRINT_HQ
+        if allow_copying:
+            permissions |= fitz.PDF_PERM_COPY
+        if allow_editing:
+            permissions |= fitz.PDF_PERM_MODIFY | fitz.PDF_PERM_ANNOTATE | fitz.PDF_PERM_FORM | fitz.PDF_PERM_ASSEMBLE
+        if owner_password is None:
+            import secrets
+
+            owner_password = secrets.token_urlsafe(24)
+        _save_atomically(
+            doc,
+            out_p,
+            garbage=3,
+            deflate=True,
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            user_pw=password,
+            owner_pw=owner_password,
+            permissions=permissions,
+        )
+    finally:
+        doc.close()
+    return str(out_p)
+
+
+def unlock_pdf(
+    pdf_path: Union[str, Path],
+    output_path: Union[str, Path],
+    password: str = "",
+) -> str:
+    """Save a copy without encryption, using the password you know."""
+    src_p = Path(pdf_path).resolve()
+    out_p = Path(output_path).resolve()
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open(str(src_p))
+    try:
+        if not doc.is_encrypted:
+            raise ValueError(f"'{src_p.name}' is not password-protected.")
+        if not doc.authenticate(password or ""):
+            raise ValueError("The password is not correct.")
+        _save_atomically(doc, out_p, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_NONE)
+    finally:
+        doc.close()
+    return str(out_p)
+
+
+# ---------------------------------------------------------------------------
+# Page numbers
+# ---------------------------------------------------------------------------
+
+PAGE_NUMBER_STYLES = {
+    "n": "{n}",
+    "n / total": "{n} / {total}",
+    "Page n": "Page {n}",
+    "Page n of total": "Page {n} of {total}",
+}
+PAGE_NUMBER_POSITIONS = (
+    "bottom-center", "bottom-right", "bottom-left", "top-center", "top-right", "top-left",
+)
+
+
+def add_page_numbers(
+    pdf_path: Union[str, Path],
+    output_path: Union[str, Path],
+    position: str = "bottom-center",
+    style: str = "n / total",
+    start: int = 1,
+    font_size: float = 10.0,
+    margin: float = 28.0,
+    skip_first: bool = False,
+) -> str:
+    """Stamp page numbers that read upright on every page, including rotated ones."""
+    if position not in PAGE_NUMBER_POSITIONS:
+        raise ValueError(f"Unknown position '{position}'.")
+    template = PAGE_NUMBER_STYLES.get(style, style)
+    if "{n}" not in template:
+        raise ValueError("The number format must contain {n}.")
+    src_p = Path(pdf_path).resolve()
+    out_p = Path(output_path).resolve()
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open(str(src_p))
+    try:
+        if doc.needs_pass:
+            raise ValueError(f"'{src_p.name}' is password-protected. Remove the password first.")
+        numbered = [i for i in range(len(doc)) if not (skip_first and i == 0)]
+        total = len(numbered) + start - 1
+        vertical, horizontal = position.split("-")
+        for count, index in enumerate(numbered):
+            page = doc[index]
+            text = template.format(n=start + count, total=total)
+            width = fitz.get_text_length(text, fontname="helv", fontsize=font_size)
+            visible = page.rect  # what the reader sees, after /Rotate
+            if horizontal == "left":
+                x = visible.x0 + margin
+            elif horizontal == "right":
+                x = visible.x1 - margin - width
+            else:
+                x = (visible.x0 + visible.x1 - width) / 2
+            y = visible.y0 + margin + font_size if vertical == "top" else visible.y1 - margin
+            # Map the point from visible to unrotated page space; rotate the text
+            # with the page so it reads upright.
+            point = fitz.Point(x, y) * page.derotation_matrix
+            page.insert_text(
+                point,
+                text,
+                fontname="helv",
+                fontsize=font_size,
+                color=(0.2, 0.2, 0.2),
+                rotate=page.rotation,
+            )
+        _save_atomically(doc, out_p, garbage=3, deflate=True)
+    finally:
+        doc.close()
     return str(out_p)

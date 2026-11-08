@@ -29,7 +29,7 @@ class ImageToolsPage(QFrame):
         set_eyebrow(eyebrow)
         title = QLabel("Image tools")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Compress image batches with quality, format, resize, and metadata controls.")
+        subtitle = QLabel("Compress image batches with quality, format, resize, and metadata controls. Drop images here to start.")
         subtitle.setObjectName("MutedLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(eyebrow)

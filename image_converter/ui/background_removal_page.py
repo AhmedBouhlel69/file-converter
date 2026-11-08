@@ -5,24 +5,25 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QUrl, Signal
+from PySide6.QtCore import QObject, QRunnable, QSize, QStandardPaths, Qt, QThreadPool, QUrl, Signal
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QImage, QImageReader, QKeySequence,
     QPainter, QShortcut,
 )
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QApplication, QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
     QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
 from image_converter.core.background_removal import (
-    BackgroundRemovalConfig, IMAGE_EXTENSIONS, MODEL_PROFILES, plan_tasks,
+    BackgroundRemovalConfig, IMAGE_EXTENSIONS, MODEL_PROFILES, installed_profiles, plan_tasks,
 )
 from image_converter.ui.background_worker import BackgroundRemovalWorker
 from image_converter.ui.image_clipboard import (
-    clipboard_mime_data, file_signature, load_clipboard_image,
+    PasteTask, clipboard_mime_data, discard_pasted_file, file_signature, inspect_mime,
+    load_clipboard_image, purge_stale_pasted_files,
 )
 from image_converter.ui.theme import repolish, set_eyebrow, set_variant
 
@@ -155,8 +156,16 @@ class BackgroundRemovalPage(QFrame):
         self._copy_tasks = {}
         self._copy_busy = False
         self._copy_errors: set[Path] = set()
+        # Scratch copies of images pasted from the clipboard; removed with their queue entry.
+        self._pasted: set[Path] = set()
+        self._paste_tasks: dict[int, PasteTask] = {}
+        self._paste_generation = 0
         self.start_guard = None
+        purge_stale_pasted_files()
         self._build_ui()
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._discard_all_pasted)
 
     @property
     def is_running(self) -> bool:
@@ -170,7 +179,7 @@ class BackgroundRemovalPage(QFrame):
         set_eyebrow(eyebrow)
         title = QLabel("Background removal")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Create cutouts locally. Drop JPEG, PNG, WebP, BMP, or TIFF images here.")
+        subtitle = QLabel("Create cutouts locally. Drop, add, or paste (Ctrl+V) JPEG, PNG, WebP, BMP, or TIFF images.")
         subtitle.setObjectName("MutedLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(eyebrow)
@@ -195,18 +204,35 @@ class BackgroundRemovalPage(QFrame):
         add_row = QHBoxLayout()
         self.btn_add = QPushButton("Add images")
         self.btn_add.clicked.connect(self.browse_images)
+        self.btn_paste = QPushButton("Paste image")
+        self.btn_paste.setToolTip("Paste a copied image, screenshot, or copied image files (Ctrl+V)")
+        self.btn_paste.setAccessibleName("Paste image from clipboard")
+        self.btn_paste.clicked.connect(self.paste_images)
         self.btn_queue = QPushButton("Use conversion queue")
         self.btn_queue.clicked.connect(self.queue_requested.emit)
         set_variant(self.btn_add, "secondary")
+        set_variant(self.btn_paste, "secondary")
         set_variant(self.btn_queue, "ghost")
         add_row.addWidget(self.btn_add)
-        add_row.addWidget(self.btn_queue)
+        add_row.addWidget(self.btn_paste)
         left.addLayout(add_row)
+        left.addWidget(self.btn_queue)
         self.file_list = QListWidget()
         self.file_list.setAccessibleName("Background removal image queue")
         self.file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.file_list.setWordWrap(True)
         self.file_list.currentRowChanged.connect(self._show_selection)
+        self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        self.paste_action = QAction("Paste image", self.file_list)
+        self.paste_action.setShortcutVisibleInContextMenu(True)
+        self.paste_action.triggered.connect(self.paste_images)
+        self.file_list.addAction(self.paste_action)
+        self.remove_action = QAction("Remove selected", self.file_list)
+        self.remove_action.triggered.connect(self.remove_selected)
+        self.file_list.addAction(self.remove_action)
+        self.paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self)
+        self.paste_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.paste_shortcut.activated.connect(self.paste_images)
         left.addWidget(self.file_list, stretch=1)
         remove_row = QHBoxLayout()
         self.btn_remove = QPushButton("Remove selected")
@@ -219,7 +245,8 @@ class BackgroundRemovalPage(QFrame):
         remove_row.addStretch()
         remove_row.addWidget(self.btn_clear)
         left.addLayout(remove_row)
-        hint = QLabel("Up to 25 MiB and 120 megapixels per image. Originals stay untouched.")
+        hint = QLabel("Up to 25 MiB and 120 megapixels per image. Originals stay untouched. "
+                      "Pasted images are saved to your Pictures folder unless you choose another one.")
         hint.setObjectName("MutedLabel")
         hint.setWordWrap(True)
         left.addWidget(hint)
@@ -275,6 +302,7 @@ class BackgroundRemovalPage(QFrame):
         options.setAlignment(Qt.AlignmentFlag.AlignTop)
         grid = QGridLayout()
         self.combo_model = QComboBox()
+        self.combo_model.addItem("Auto (best installed)", "auto")
         for profile in MODEL_PROFILES:
             self.combo_model.addItem(profile.title(), profile)
         self.combo_format = QComboBox()
@@ -290,7 +318,7 @@ class BackgroundRemovalPage(QFrame):
         self._update_model_hint()
         grid.addWidget(self.model_hint, 1, 0, 1, 4)
         self.txt_output = QLineEdit()
-        self.txt_output.setPlaceholderText("Same folder as each source image")
+        self.txt_output.setPlaceholderText("Same folder as each source image (pasted: Pictures)")
         self.txt_output.setAccessibleName("Background removal output folder")
         browse_output = QPushButton("Browse…")
         browse_output.clicked.connect(self._browse_output)
@@ -305,6 +333,22 @@ class BackgroundRemovalPage(QFrame):
         toggles.addWidget(self.chk_metadata)
         toggles.addStretch()
         options.addLayout(toggles)
+        quality = QHBoxLayout()
+        self.chk_clean_edges = QCheckBox("Clean edges")
+        self.chk_clean_edges.setChecked(True)
+        self.chk_clean_edges.setToolTip(
+            "Removes the colour halo the old background leaves on soft edges, and clears "
+            "the picture data hidden under transparent pixels."
+        )
+        self.chk_accurate = QCheckBox("High accuracy (slower)")
+        self.chk_accurate.setToolTip("Averages the result with its mirror image. Takes about twice as long.")
+        self.chk_autocopy = QCheckBox("Copy result when done")
+        self.chk_autocopy.setToolTip("After a single image finishes, copy the cutout so you can paste it right away.")
+        quality.addWidget(self.chk_clean_edges)
+        quality.addWidget(self.chk_accurate)
+        quality.addWidget(self.chk_autocopy)
+        quality.addStretch()
+        options.addLayout(quality)
         self.btn_advanced = QPushButton("Show advanced settings")
         self.btn_advanced.setCheckable(True)
         set_variant(self.btn_advanced, "ghost")
@@ -324,10 +368,17 @@ class BackgroundRemovalPage(QFrame):
         self.spin_padding.setSuffix(" px")
         self.txt_fill = QLineEdit()
         self.txt_fill.setPlaceholderText("Transparent (or #ffffff)")
+        pick_fill = QPushButton("Pick…")
+        pick_fill.setAccessibleName("Pick background colour")
+        pick_fill.clicked.connect(self._pick_fill)
+        clear_fill = QPushButton("Transparent")
+        clear_fill.setAccessibleName("Use a transparent background")
+        clear_fill.clicked.connect(lambda: self.txt_fill.clear())
         self.txt_model_dir = QLineEdit()
         self.txt_model_dir.setPlaceholderText("Automatic: local, bundled, or cache")
         browse_model = QPushButton("Browse…")
         browse_model.clicked.connect(self._browse_models)
+        self.txt_model_dir.textChanged.connect(self._update_model_hint)
         advanced.addWidget(QLabel("Feather"), 0, 0)
         advanced.addWidget(self.spin_feather, 0, 1)
         advanced.addWidget(QLabel("Edge shift"), 0, 2)
@@ -336,7 +387,11 @@ class BackgroundRemovalPage(QFrame):
         advanced.addWidget(self.chk_crop, 1, 2)
         advanced.addWidget(self.spin_padding, 1, 3)
         advanced.addWidget(QLabel("Background"), 2, 0)
-        advanced.addWidget(self.txt_fill, 2, 1, 1, 3)
+        fill_row = QHBoxLayout()
+        fill_row.addWidget(self.txt_fill, stretch=1)
+        fill_row.addWidget(pick_fill)
+        fill_row.addWidget(clear_fill)
+        advanced.addLayout(fill_row, 2, 1, 1, 3)
         advanced.addWidget(QLabel("Model folder"), 3, 0)
         advanced.addWidget(self.txt_model_dir, 3, 1, 1, 2)
         advanced.addWidget(browse_model, 3, 3)
@@ -390,7 +445,15 @@ class BackgroundRemovalPage(QFrame):
         self.btn_advanced.setText("Hide advanced settings" if checked else "Show advanced settings")
 
     def _update_model_hint(self, *_args):
-        if self.combo_model.currentData() in ("quality", "portrait"):
+        if self.combo_model.currentData() == "auto":
+            present = installed_profiles(self.txt_model_dir.text().strip() or None) if hasattr(self, "txt_model_dir") else []
+            best = next((name for name in ("balanced", "fast") if name in present), None)
+            self.model_hint.setText(
+                f"Auto will use {best.title()} (best installed)." if best else
+                "Auto uses Balanced when installed, otherwise Fast. No model was found yet; "
+                "see the README to install one."
+            )
+        elif self.combo_model.currentData() in ("quality", "portrait"):
             self.model_hint.setText(
                 "Quality and Portrait require at least 8 GiB of free RAM. "
                 "Choose Fast or Balanced when memory is limited."
@@ -416,8 +479,10 @@ class BackgroundRemovalPage(QFrame):
             self.txt_model_dir.setText(folder)
 
     def add_files(self, paths):
+        """Queue image files or folders; returns the paths that were newly added."""
         if self.is_running:
-            return
+            return []
+        added: list[Path] = []
         known = {path.resolve() for path in self.files}
         ignored = 0
         for raw in paths:
@@ -432,6 +497,7 @@ class BackgroundRemovalPage(QFrame):
                     continue
                 known.add(resolved)
                 self.files.append(resolved)
+                added.append(resolved)
                 item = QListWidgetItem(f"{resolved.name}\nQueued")
                 item.setToolTip(str(resolved))
                 item.setSizeHint(QSize(220, 70))
@@ -441,19 +507,22 @@ class BackgroundRemovalPage(QFrame):
             self.file_list.setCurrentRow(0)
         if ignored:
             self._set_status("Some files were skipped. Use JPEG, PNG, WebP, BMP, or TIFF.", "warning")
+        return added
 
     def _refresh_count(self):
         count = len(self.files)
         self.count_label.setText(f"{count} IMAGE{'S' if count != 1 else ''}")
         self.btn_start.setEnabled(bool(count) and not self.is_running)
-        self._set_status(f"{count} image{'s' if count != 1 else ''} ready · Transparent PNG or lossless WebP" if count else "Add images to get started")
+        self._set_status(f"{count} image{'s' if count != 1 else ''} ready · Transparent PNG or lossless WebP" if count else "Add or paste images to get started")
 
     def remove_selected(self):
         if self.is_running:
             return
         rows = sorted({self.file_list.row(item) for item in self.file_list.selectedItems()}, reverse=True)
         for row in rows:
-            self.outputs.pop(self.files.pop(row), None)
+            removed = self.files.pop(row)
+            self.outputs.pop(removed, None)
+            self._discard_pasted(removed)
             self.file_list.takeItem(row)
         self._refresh_count()
         self._show_selection(self.file_list.currentRow())
@@ -461,6 +530,7 @@ class BackgroundRemovalPage(QFrame):
     def clear_files(self):
         if self.is_running:
             return
+        self._discard_all_pasted()
         self.files.clear()
         self.outputs.clear()
         self.file_list.clear()
@@ -551,6 +621,8 @@ class BackgroundRemovalPage(QFrame):
             feather=self.spin_feather.value(), edge_shift=self.spin_edge.value(),
             two_pass=self.chk_two_pass.isChecked(), save_mask=self.chk_mask.isChecked(),
             keep_metadata=self.chk_metadata.isChecked(),
+            clean_edges=self.chk_clean_edges.isChecked(),
+            accurate=self.chk_accurate.isChecked(),
         )
 
     def start(self):
@@ -563,8 +635,10 @@ class BackgroundRemovalPage(QFrame):
                 return
         try:
             config = self._config()
+            default_dirs = {path: self._pasted_output_dir() for path in self.files if path in self._pasted}
             self.tasks = plan_tasks(self.files, self.txt_output.text().strip() or None,
-                                    config.output_format, save_mask=config.save_mask)
+                                    config.output_format, save_mask=config.save_mask,
+                                    default_dirs=default_dirs)
         except Exception as exc:
             self._set_status(str(exc), "error")
             return
@@ -626,6 +700,7 @@ class BackgroundRemovalPage(QFrame):
 
     def _worker_finished(self):
         worker, self.worker = self.worker, None
+        model_used = getattr(worker, "model_used", None) if worker else None
         if worker:
             worker.deleteLater()
         self._set_busy(False)
@@ -640,9 +715,16 @@ class BackgroundRemovalPage(QFrame):
                 if source not in completed:
                     self.file_list.item(row).setText(f"{source.name}\nCancelled")
         message = f"{'Cancelled' if self._cancelled else 'Complete'} · {success} saved · {len(failures)} failed"
+        if model_used:
+            message += f" · {model_used.title()} model"
         if failures:
             message += f" · {failures[0].error_message}"
         self._set_status(message, "warning" if self._cancelled or failures else "success")
+        if self.chk_autocopy.isChecked() and success == 1 and len(self._results) == 1 and not self._cancelled:
+            done = Path(self._results[0].input_path).resolve()
+            if done in self.files:
+                self.file_list.setCurrentRow(self.files.index(done))
+                self.copy_result()
 
     def cancel(self):
         if self.worker:
@@ -656,7 +738,8 @@ class BackgroundRemovalPage(QFrame):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_output)))
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and not self.is_running:
+        mime = event.mimeData()
+        if (mime.hasUrls() or mime.hasImage()) and not self.is_running:
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -665,5 +748,75 @@ class BackgroundRemovalPage(QFrame):
         if self.is_running:
             event.ignore()
             return
-        self.add_files([Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()])
+        mime = event.mimeData()
+        paths = [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+        if paths:
+            self.add_files(paths)
+        else:
+            # An image dragged from a browser or another app arrives as pixels, not a file.
+            self._ingest(inspect_mime(mime))
         event.acceptProposedAction()
+
+    # -- Paste ---------------------------------------------------------------------------
+
+    def paste_images(self):
+        """Add whatever image the clipboard holds: a screenshot, a copied picture, or files."""
+        if self.is_running:
+            self._set_status("Wait for the current batch to finish before pasting more images.", "warning")
+            return
+        self._ingest(inspect_mime(QApplication.clipboard().mimeData()))
+
+    def _ingest(self, content):
+        if content.empty:
+            self._set_status("The clipboard has no image. Copy a picture or take a screenshot, then paste again.", "warning")
+            return
+        if content.files:
+            added = self.add_files(content.files)
+            if added:
+                self.file_list.setCurrentRow(self.files.index(added[-1]))
+                self._set_status(f"Pasted {len(added)} image{'s' if len(added) != 1 else ''}.", "success")
+            return
+        self._paste_generation += 1
+        generation = self._paste_generation
+        self.btn_paste.setEnabled(False)
+        self._set_status("Pasting image…")
+        task = PasteTask(content.image)
+        self._paste_tasks[generation] = task
+        task.signals.done.connect(lambda path, error, g=generation: self._paste_done(g, path, error))
+        QThreadPool.globalInstance().start(task)
+
+    def _paste_done(self, generation, path, error):
+        self._paste_tasks.pop(generation, None)
+        self.btn_paste.setEnabled(not self.is_running)
+        if error or path is None:
+            self._set_status(f"Could not paste the image. {error}", "error")
+            return
+        if self.is_running:
+            discard_pasted_file(path)
+            return
+        added = self.add_files([path])
+        if not added:
+            discard_pasted_file(path)
+            return
+        self._pasted.add(added[0])
+        self.file_list.setCurrentRow(self.files.index(added[0]))
+        self._set_status("Pasted image added. Press Remove background to process it.", "success")
+
+    def _pasted_output_dir(self) -> Path:
+        pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        return Path(pictures or Path.home()) / "Background Removed"
+
+    def _discard_pasted(self, path: Path):
+        if path in self._pasted:
+            self._pasted.discard(path)
+            discard_pasted_file(path)
+
+    def _discard_all_pasted(self):
+        for path in list(self._pasted):
+            self._discard_pasted(path)
+
+    def _pick_fill(self):
+        current = QColor(self.txt_fill.text().strip()) if self.txt_fill.text().strip() else QColor("#ffffff")
+        color = QColorDialog.getColor(current if current.isValid() else QColor("#ffffff"), self, "Choose a background colour")
+        if color.isValid():
+            self.txt_fill.setText(color.name())

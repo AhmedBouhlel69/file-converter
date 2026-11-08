@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QStandardPaths, Qt, QThreadPool
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,6 +37,7 @@ from image_converter.ui.components import (
     FilePreviewWidget,
     format_bytes,
 )
+from image_converter.ui.image_clipboard import PasteTask, inspect_mime
 from image_converter.ui.image_tools_page import ImageToolsPage
 from image_converter.ui.background_removal_page import BackgroundRemovalPage
 from image_converter.ui.pdf_tools_page import PdfToolsPage
@@ -68,6 +69,22 @@ def get_app_icon() -> QIcon:
         if path.exists():
             return QIcon(str(path))
     return QIcon()
+
+
+def unique_destination(path: Path, reserved: Optional[set] = None) -> Path:
+    """Return ``path`` or ``name (2).ext``, ``name (3).ext``... so nothing is overwritten.
+
+    ``reserved`` holds destinations already claimed in this batch, so two inputs
+    such as ``photo.png`` and ``photo.jpg`` converted to PDF do not collide.
+    """
+    reserved = reserved if reserved is not None else set()
+    candidate = path
+    counter = 2
+    while candidate.exists() or str(candidate).casefold() in reserved:
+        candidate = path.with_name(f"{path.stem} ({counter}){path.suffix}")
+        counter += 1
+    reserved.add(str(candidate).casefold())
+    return candidate
 
 
 class DragOverlay(QFrame):
@@ -140,6 +157,8 @@ class ImageConverterMainWindow(QMainWindow):
         self.pdf_tools_page.split_requested.connect(self._open_split_dialog)
         self.pdf_tools_page.organize_requested.connect(self._open_organize_dialog)
         self.pdf_tools_page.compress_requested.connect(self._open_compress_dialog)
+        self.pdf_tools_page.protect_requested.connect(self._open_protect_dialog)
+        self.pdf_tools_page.numbers_requested.connect(self._open_numbers_dialog)
         self.image_tools_page = ImageToolsPage()
         self.image_tools_page.compress_requested.connect(self._open_image_compress_dialog)
         self.background_removal_page = BackgroundRemovalPage()
@@ -389,7 +408,7 @@ class ImageConverterMainWindow(QMainWindow):
         copy.setSpacing(2)
         self.lbl_status = QLabel("0 files · 0 B → —")
         self.lbl_status.setObjectName("StatusLabel")
-        self.lbl_status_hint = QLabel("Output: same folder as each source. Existing destination files may be replaced.")
+        self.lbl_status_hint = QLabel("Output: same folder as each source. Existing files are never replaced.")
         self.lbl_status_hint.setObjectName("MutedLabel")
         self.lbl_status_hint.setWordWrap(True)
         self.lbl_metadata_result = QLabel()
@@ -438,6 +457,10 @@ class ImageConverterMainWindow(QMainWindow):
         self.btn_mode_background.setChecked(index == 3)
         self.btn_add_files.setVisible(index == 0)
         self.btn_add_folder.setVisible(index == 0)
+        # The background page has its own Ctrl+V; two active shortcuts would cancel each other.
+        paste = getattr(self, "_paste_shortcut", None)
+        if paste is not None:
+            paste.setEnabled(index != 3)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -447,7 +470,7 @@ class ImageConverterMainWindow(QMainWindow):
     def dragEnterEvent(self, event):
         background_active = self.app_stack.currentWidget() is self.background_removal_page
         busy = self.background_removal_page.is_running if background_active else self._is_converting
-        if event.mimeData().hasUrls() and not busy:
+        if (event.mimeData().hasUrls() or event.mimeData().hasImage()) and not busy:
             event.acceptProposedAction()
             self.drag_overlay.setGeometry(self.centralWidget().rect().adjusted(4, 4, -4, -4))
             self.drag_overlay.show()
@@ -458,7 +481,7 @@ class ImageConverterMainWindow(QMainWindow):
     def dragMoveEvent(self, event):
         background_active = self.app_stack.currentWidget() is self.background_removal_page
         busy = self.background_removal_page.is_running if background_active else self._is_converting
-        if event.mimeData().hasUrls() and not busy:
+        if (event.mimeData().hasUrls() or event.mimeData().hasImage()) and not busy:
             event.acceptProposedAction()
 
     def dragLeaveEvent(self, event):
@@ -475,10 +498,47 @@ class ImageConverterMainWindow(QMainWindow):
             candidate = Path(url.toLocalFile())
             if candidate.exists():
                 paths.extend(collect_convertible_files(candidate, recursive=True))
+        if not paths and not event.mimeData().hasUrls():
+            # Pixels dragged from a browser or another app rather than a file.
+            self._ingest_pasted(inspect_mime(event.mimeData(), suffixes=None))
+        if paths and self._route_drop_to_tool(paths):
+            event.acceptProposedAction()
+            return
         if paths:
             self._set_app_mode(0)
             self.add_images(paths)
         event.acceptProposedAction()
+
+    def _route_drop_to_tool(self, paths: List[Path]) -> bool:
+        """Files dropped on a tool page open that tool instead of the Convert queue."""
+        current = self.app_stack.currentWidget()
+        if current is self.pdf_tools_page:
+            pdfs = [p for p in paths if p.suffix.lower() == ".pdf"]
+            tool = self.pdf_tools_page.stack.currentIndex()
+            if tool == 0:  # Merge accepts PDFs and pictures
+                mergeable = [p for p in paths if p.suffix.lower() in {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif"}]
+                if mergeable:
+                    self._open_merge_dialog_with_files(mergeable)
+                    return True
+            elif pdfs:
+                opener = {
+                    1: self._open_split_dialog_with_file,
+                    2: self._open_organize_dialog_with_file,
+                    3: self._open_compress_dialog_with_file,
+                    4: self._open_protect_dialog_with_file,
+                    5: self._open_numbers_dialog_with_file,
+                }.get(tool)
+                if opener is not None:
+                    opener(pdfs[0])
+                    return True
+        elif current is self.image_tools_page:
+            from image_converter.core.engine import IMAGE_INPUT_EXTS
+
+            images = [p for p in paths if p.suffix.lower() in IMAGE_INPUT_EXTS]
+            if images:
+                self._open_image_compress_dialog_with_files(images)
+                return True
+        return False
 
     def _setup_shortcuts(self):
         bindings = (
@@ -492,6 +552,10 @@ class ImageConverterMainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(keys), self)
             shortcut.activated.connect(handler)
             self._shortcuts.append(shortcut)
+        self._paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self)
+        self._paste_shortcut.activated.connect(self._paste_from_clipboard)
+        self._paste_shortcut.setEnabled(self.app_stack.currentWidget() is not self.background_removal_page)
+        self._shortcuts.append(self._paste_shortcut)
         for queue in (self.queue_table, self.background_removal_page.file_list):
             shortcut = QShortcut(QKeySequence("Delete"), queue)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -583,7 +647,7 @@ class ImageConverterMainWindow(QMainWindow):
             )
             output_dir = self.settings_widget.get_output_directory()
             destination = str(output_dir) if output_dir else "same folder as each source"
-            self.lbl_status_hint.setText(f"Output: {destination}. Existing destination files may be replaced.")
+            self.lbl_status_hint.setText(f"Output: {destination}. Existing files are never replaced.")
 
         evidence = [entry.metadata_evidence for entry in model.entries if entry.metadata_evidence is not None]
         self.lbl_metadata_result.setText(metadata_check_summary(evidence))
@@ -596,7 +660,8 @@ class ImageConverterMainWindow(QMainWindow):
                 model.has_images(),
                 model.has_documents(),
                 estimated_total,
-                mixed_queue=bool(total and not compatible_formats),
+                mixed_queue=model.is_mixed(),
+                natural_default=model.natural_default(),
             )
             selected_default = self.settings_widget.get_target_format()
             if selected_default and model.default_format != selected_default:
@@ -628,6 +693,44 @@ class ImageConverterMainWindow(QMainWindow):
             self.lbl_status_hint.setText("No new files were added. Check the selected paths and queue for duplicates.")
 
     add_files = add_images
+
+    # -- Clipboard ------------------------------------------------------------------------
+
+    def _paste_from_clipboard(self):
+        """Ctrl+V on the conversion pages: copied files, or a screenshot / copied picture."""
+        if self._is_converting or self.background_removal_page.is_running:
+            self.lbl_status_hint.setText("Wait for the current job to finish before pasting.")
+            return
+        self._ingest_pasted(inspect_mime(QApplication.clipboard().mimeData(), suffixes=None))
+
+    def _ingest_pasted(self, content):
+        if content.empty:
+            self.lbl_status_hint.setText("The clipboard has no image or files. Copy a picture or files, then paste again.")
+            return
+        if content.files:
+            paths: List[Path] = []
+            for candidate in content.files:
+                paths.extend(collect_convertible_files(candidate, recursive=True) if candidate.is_dir() else [candidate])
+            if paths:
+                self.add_images(paths)
+            else:
+                self.lbl_status_hint.setText("Nothing pasted: the copied files are not a supported type.")
+            return
+        # A pasted bitmap becomes a real file in Pictures so converted copies land somewhere findable.
+        pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        task = PasteTask(content.image, Path(pictures or Path.home()) / "Pasted Images")
+        self._paste_task = task
+        task.signals.done.connect(self._pasted_image_saved)
+        self.lbl_status_hint.setText("Pasting image…")
+        QThreadPool.globalInstance().start(task)
+
+    def _pasted_image_saved(self, path, error):
+        self._paste_task = None
+        if error or path is None:
+            self.lbl_status_hint.setText(f"Could not paste the image. {error}")
+            return
+        self.add_images([Path(path)])
+        self.lbl_status_hint.setText(f"Pasted image saved to {Path(path).parent.name} and added to the queue.")
 
     def _add_files_dialog(self):
         if self.app_stack.currentWidget() is self.background_removal_page:
@@ -745,6 +848,7 @@ class ImageConverterMainWindow(QMainWindow):
         base_config = self.settings_widget.get_config()
         custom_out_dir = self.settings_widget.get_output_directory()
         tasks = []
+        reserved: set = set()
         for row in rows:
             entry = model.entry(row)
             source = entry.path
@@ -759,6 +863,7 @@ class ImageConverterMainWindow(QMainWindow):
                 if destination.resolve() == source.resolve():
                     suffix = "_clean" if row_config.strip_metadata else "_converted"
                     destination = out_dir / f"{source.stem}{suffix}{row_ext}"
+            destination = unique_destination(destination, reserved)
             tasks.append((source, destination, row_config))
 
         self._active_rows = rows
@@ -915,6 +1020,26 @@ class ImageConverterMainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # PDF tools and output helpers
     # ------------------------------------------------------------------
+    def _open_protect_dialog(self):
+        from image_converter.ui.tool_dialogs import ProtectDialog
+
+        ProtectDialog(initial_file=self._get_selected_pdf_path(), parent=self).exec()
+
+    def _open_protect_dialog_with_file(self, path: Path):
+        from image_converter.ui.tool_dialogs import ProtectDialog
+
+        ProtectDialog(initial_file=path, parent=self).exec()
+
+    def _open_numbers_dialog(self):
+        from image_converter.ui.tool_dialogs import PageNumbersDialog
+
+        PageNumbersDialog(initial_file=self._get_selected_pdf_path(), parent=self).exec()
+
+    def _open_numbers_dialog_with_file(self, path: Path):
+        from image_converter.ui.tool_dialogs import PageNumbersDialog
+
+        PageNumbersDialog(initial_file=path, parent=self).exec()
+
     def _open_merge_dialog(self):
         MergeDialog(initial_files=self._get_selected_or_all_paths(), parent=self).exec()
 

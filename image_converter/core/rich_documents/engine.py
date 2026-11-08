@@ -139,9 +139,11 @@ class RichDocumentConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        raw = in_p.read_text(encoding="utf-8", errors="ignore")
-        plain = rtf_to_text(raw).strip()
-        out_p.write_text(plain, encoding="utf-8")
+        from image_converter.core.text_io import decode_text
+
+        raw, _ = decode_text(in_p.read_bytes())
+        plain = rtf_to_text(raw, errors="ignore").strip()
+        out_p.write_text(plain + "\n", encoding="utf-8")
         return out_p
 
     def convert_rtf_to_pdf(
@@ -169,21 +171,23 @@ class RichDocumentConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        if isinstance(text_or_path, (str, Path)) and Path(text_or_path).is_file():
-            content = Path(text_or_path).read_text(encoding="utf-8", errors="ignore")
+        from image_converter.core.text_io import read_text_file, rtf_escape
+
+        if isinstance(text_or_path, Path) or (isinstance(text_or_path, str) and len(text_or_path) < 260 and "\n" not in text_or_path and Path(text_or_path).is_file()):
+            content = read_text_file(text_or_path)
         else:
             content = str(text_or_path)
 
-        # Basic RTF envelope
-        escaped_lines = []
-        for line in content.splitlines():
-            clean = line.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-            escaped_lines.append(f"{clean}\\par")
+        # RTF is 7-bit: every non-ASCII character is written as \\uN? so Word,
+        # WordPad and LibreOffice show accents, Arabic and CJK correctly.
+        body = "\n".join(f"{rtf_escape(line)}\\par" for line in content.split("\n"))
+        rtf_doc = (
+            "{\\rtf1\\ansi\\ansicpg1252\\deff0\\uc1\n"
+            "{\\fonttbl{\\f0\\fnil\\fcharset0 Calibri;}}\n"
+            f"\\viewkind4\\pard\\f0\\fs22 {body}\n}}"
+        )
 
-        rtf_body = "\n".join(escaped_lines)
-        rtf_doc = f"{{\\rtf1\\ansi\\deff0\n{{\\fonttbl{{\\f0\\fnil\\fcharset0 Calibri;}}}}\n\\viewkind4\\uc1\\pard\\f0\\fs22 {rtf_body}\n}}"
-
-        out_p.write_text(rtf_doc, encoding="utf-8")
+        out_p.write_text(rtf_doc, encoding="ascii")
         return out_p
 
     # -------------------------------------------------------------------------
@@ -320,39 +324,12 @@ class RichDocumentConverter:
                     if out_p.is_file() and out_p.stat().st_size > 0:
                         return out_p
 
-        raise RuntimeError(f"Native conversion to {format_name} requires Microsoft Word on Windows.")
+        from image_converter.core.platform.libreoffice import fallback_or_raise
 
-    def _text_to_pdf(self, text: str, out_path: Path, title: str) -> Path:
-        """Render raw text into styled PDF."""
-        styles = getSampleStyleSheet()
-        normal = styles["Normal"]
-        normal.fontSize = 10
-        normal.leading = 14
-        normal.textColor = colors.HexColor("#1e293b")
+        return fallback_or_raise(in_p, out_p, format_name, f"Native conversion to {format_name} requires Microsoft Word on Windows.")
 
-        h1 = ParagraphStyle(
-            "DocTitle",
-            parent=styles["Heading1"],
-            fontSize=18,
-            leading=22,
-            textColor=colors.HexColor("#0f172a"),
-            spaceAfter=12,
-        )
+    def _text_to_pdf(self, text: str, out_path: Path, title: Optional[str] = None) -> Path:
+        """Render plain text into a PDF that keeps every script and the layout."""
+        from image_converter.core.text_io import html_to_pdf, text_to_html_body
 
-        story = [Paragraph(html.escape(title), h1), Spacer(1, 8)]
-        for para in text.splitlines():
-            t = para.strip()
-            if t:
-                story.append(Paragraph(html.escape(t), normal))
-                story.append(Spacer(1, 4))
-
-        doc = SimpleDocTemplate(
-            str(out_path),
-            pagesize=letter,
-            leftMargin=36,
-            rightMargin=36,
-            topMargin=36,
-            bottomMargin=36,
-        )
-        doc.build(story)
-        return out_path
+        return html_to_pdf(text_to_html_body(text), out_path)

@@ -296,7 +296,9 @@ class PresentationConverter:
                         if out_p.is_file() and out_p.stat().st_size > 0:
                             return out_p
 
-        raise RuntimeError("Native PPTX to PDF conversion requires Microsoft PowerPoint on Windows.")
+        from image_converter.core.platform.libreoffice import fallback_or_raise
+
+        return fallback_or_raise(in_p, out_p, "PDF", "Native PPTX to PDF conversion requires Microsoft PowerPoint on Windows.")
 
     def convert_pptx_to_images(
         self,
@@ -325,6 +327,10 @@ class PresentationConverter:
             base_stem = out_p.stem if out_p.suffix else Path(pptx_path).stem
             out_dir = out_p.parent if out_p.suffix else out_p
             generated: List[Path] = []
+            from image_converter.core.documents.engine import free_series_stem, save_pixmap
+
+            if not (len(doc) == 1 and out_p.suffix):
+                base_stem = free_series_stem(out_dir, base_stem, "slide", ext, len(doc))
 
             for idx, page in enumerate(doc):
                 pix = page.get_pixmap(matrix=matrix, alpha=False)
@@ -332,7 +338,7 @@ class PresentationConverter:
                     dest = out_p
                 else:
                     dest = out_dir / f"{base_stem}_slide_{idx + 1}{ext}"
-                pix.save(str(dest))
+                save_pixmap(pix, dest, target_format, dpi)
                 generated.append(dest)
 
             doc.close()
@@ -348,10 +354,13 @@ class PresentationConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
-        if isinstance(text_or_path, (str, Path)) and Path(text_or_path).is_file():
-            content = Path(text_or_path).read_text(encoding="utf-8", errors="ignore")
+        from image_converter.core.text_io import read_text_file, xml_safe
+
+        if isinstance(text_or_path, Path) or (isinstance(text_or_path, str) and len(text_or_path) < 260 and "\n" not in text_or_path and Path(text_or_path).is_file()):
+            content = read_text_file(text_or_path)
         else:
             content = str(text_or_path)
+        content = xml_safe(content)
 
         prs = Presentation()
         blank_slide_layout = prs.slide_layouts[1]  # Title and Content layout
@@ -363,21 +372,27 @@ class PresentationConverter:
         if not sections:
             sections = [content.strip()]
 
+        per_slide = 8
         for sec in sections:
             lines = [l.strip() for l in sec.splitlines() if l.strip()]
             if not lines:
                 continue
 
-            slide = prs.slides.add_slide(blank_slide_layout)
-            title = lines[0].lstrip("0123456789= :.-")
-            slide.shapes.title.text = title or "Slide"
-
-            if len(lines) > 1:
-                tf = slide.shapes.placeholders[1].text_frame
-                tf.clear()
-                for body_line in lines[1:10]:
-                    p = tf.add_paragraph()
-                    p.text = body_line.lstrip("•-* ")
+            title = lines[0].lstrip("0123456789= :.-") or "Slide"
+            body = lines[1:]
+            # Long sections continue on extra slides instead of being cut off.
+            chunks = [body[i:i + per_slide] for i in range(0, len(body), per_slide)] or [[]]
+            for part, chunk in enumerate(chunks):
+                slide = prs.slides.add_slide(blank_slide_layout)
+                slide.shapes.title.text = title if part == 0 else f"{title} (continued)"
+                if chunk:
+                    tf = slide.shapes.placeholders[1].text_frame
+                    tf.text = chunk[0].lstrip("•-* ")
+                    for body_line in chunk[1:]:
+                        p = tf.add_paragraph()
+                        p.text = body_line.lstrip("•-* ")
+                else:
+                    slide.shapes.placeholders[1].element.getparent().remove(slide.shapes.placeholders[1].element)
 
         prs.save(str(out_p))
         return out_p

@@ -246,8 +246,8 @@ def test_docx_to_pdf_exhausted_fallback_surfaces_failure(engine, temp_dir, monke
 
 def test_xlsx_to_pdf_exhausted_fallback_surfaces_failure(engine, temp_dir, monkeypatch):
     """
-    Item 2 verification: When xlsx->pdf fallbacks are exhausted (MS Excel COM fails),
-    the conversion must return success=False with a specific error message.
+    When Excel COM cannot start, XLSX->PDF falls back to a table rendering and
+    reports that Excel's formatting was not used.
     """
     import pandas as pd
     xlsx_path = temp_dir / "test.xlsx"
@@ -271,9 +271,11 @@ def test_xlsx_to_pdf_exhausted_fallback_surfaces_failure(engine, temp_dir, monke
         pass
 
     result = engine.convert_single(xlsx_path, out_pdf, ConversionConfig(target_format="PDF"))
-    assert result.success is False
+    # Without a working Excel the workbook is still rendered, as plain tables,
+    # and the result says why the formatting is missing.
+    assert result.success is True
     assert "Microsoft Excel" in result.error_message
-    assert not out_pdf.exists(), "No partial or corrupt output file must be left behind on failed XLSX->PDF"
+    assert out_pdf.read_bytes().startswith(b"%PDF")
 
 
 def test_pptx_to_pdf_exhausted_fallback_surfaces_failure(engine, temp_dir, monkeypatch):

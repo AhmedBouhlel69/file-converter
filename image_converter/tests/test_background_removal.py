@@ -153,7 +153,10 @@ def test_process_reuses_cpu_session_and_writes_alpha_and_mask(photo, tmp_path, b
     assert backend.init_options["threads"] == 2
     assert backend.releases == 1
     assert [(n, total) for n, total, _ in progress] == [(1, 2), (2, 2)]
-    assert backend.options[0]["refinement"] == {"feather_sigma": 1.2, "edge_shift": -1}
+    assert backend.options[0]["refinement"] == {
+        "feather_sigma": 1.2, "edge_shift": -1, "decontaminate": True,
+    }
+    assert "tta" not in backend.options[0]
     assert backend.options[0]["composition"]["crop"] is True
     assert backend.options[0]["two_pass"] is True
     assert ("save", True, True) in backend.options
@@ -401,3 +404,121 @@ def test_fast_only_automatic_locations_do_not_hide_other_cached_models(photo, tm
     assert bg.resolve_model_directory(local_models, model) == local_models
     monkeypatch.setenv("BGREMOVE_MODEL_DIR", str(local_models))
     assert bg.resolve_model_directory(model=model) == local_models
+
+
+def test_clean_edges_and_accuracy_options_reach_the_engine_only_when_requested(photo, tmp_path, backend):
+    config = bg.BackgroundRemovalConfig(clean_edges=False, accurate=True)
+    result = bg.BackgroundRemovalService(config).process(bg.plan_tasks([photo], tmp_path / "out")[0])
+    assert result.success
+    assert backend.options[0]["refinement"] == {"feather_sigma": 0, "edge_shift": 0}
+    assert backend.options[0]["tta"] is True
+    with pytest.raises(ValueError):
+        bg.BackgroundRemovalConfig(accurate="yes")
+    with pytest.raises(ValueError):
+        bg.BackgroundRemovalConfig(clean_edges=1)
+
+
+def _installed(tmp_path, *files):
+    folder = tmp_path / "models"
+    folder.mkdir(exist_ok=True)
+    for name in files:
+        (folder / name).touch()
+    return folder
+
+
+def test_auto_model_prefers_balanced_then_fast_and_never_picks_large_models(photo, tmp_path, backend):
+    folder = _installed(tmp_path, "u2netp.onnx", "isnet-general-use.onnx", "birefnet-general.onnx")
+    assert bg.installed_profiles(folder) == ["fast", "balanced", "quality"]
+    assert bg.auto_candidates(folder) == ["balanced", "fast"]
+    service = bg.BackgroundRemovalService(bg.BackgroundRemovalConfig(model="auto", model_dir=folder))
+    assert service.process(bg.plan_tasks([photo], tmp_path / "out")[0]).success
+    assert backend.init_options["model"] == "balanced"
+    assert service.active_model == "balanced"
+
+
+def test_auto_model_falls_back_when_the_best_model_cannot_load(photo, tmp_path, backend, monkeypatch):
+    folder = _installed(tmp_path, "u2netp.onnx", "isnet-general-use.onnx")
+    attempts = []
+
+    class Broken(Exception):
+        pass
+
+    def fail_first(**kwargs):
+        attempts.append(kwargs["model"])
+        if kwargs["model"] == "balanced":
+            raise Broken("hash mismatch")
+
+    real = bg.importlib.import_module("bgremove")
+    remover_class = real.Remover
+
+    class Wrapper(remover_class):
+        def __init__(self, **kwargs):
+            fail_first(**kwargs)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(real, "Remover", Wrapper)
+    service = bg.BackgroundRemovalService(bg.BackgroundRemovalConfig(model="auto", model_dir=folder))
+    assert service.process(bg.plan_tasks([photo], tmp_path / "out")[0]).success
+    assert attempts == ["balanced", "fast"]
+    assert backend.init_options["model"] == "fast"
+
+
+def test_auto_model_reports_when_nothing_is_installed(photo, tmp_path, backend, monkeypatch):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(bg, "_cache_directory", lambda: None)
+    result = bg.BackgroundRemovalService(bg.BackgroundRemovalConfig(model="auto", model_dir=empty)).process(
+        bg.plan_tasks([photo], tmp_path / "out")[0]
+    )
+    assert not result.success
+    assert "No background-removal model is installed" in result.error_message
+
+
+def test_default_dirs_place_pasted_images_in_a_chosen_folder_but_not_over_an_output_folder(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    pasted = scratch / "pasted-1.png"
+    Image.new("RGB", (4, 4)).save(pasted)
+    normal = tmp_path / "elsewhere.png"
+    Image.new("RGB", (4, 4)).save(normal)
+    saved = tmp_path / "Pictures" / "Background Removed"
+    tasks = bg.plan_tasks([pasted, normal], default_dirs={pasted: saved})
+    assert tasks[0].output_path == saved.resolve() / "pasted-1_nobg.png"
+    assert tasks[1].output_path == normal.resolve().with_name("elsewhere_nobg.png")
+    chosen = bg.plan_tasks([pasted], tmp_path / "chosen", default_dirs={pasted: saved})
+    assert chosen[0].output_path == (tmp_path / "chosen").resolve() / "pasted-1_nobg.png"
+
+
+def test_output_is_published_on_filesystems_without_hard_links(photo, tmp_path, monkeypatch, backend):
+    def no_links(source, target):
+        raise PermissionError("hard links are not supported on this drive")
+
+    monkeypatch.setattr(bg.os, "link", no_links)
+    task = bg.plan_tasks([photo], tmp_path / "usb", save_mask=True)[0]
+    result = bg.BackgroundRemovalService(bg.BackgroundRemovalConfig(save_mask=True)).process(task)
+    assert result.success, result.error_message
+    with Image.open(task.output_path) as image:
+        assert image.mode == "RGBA"
+    assert task.mask_path.exists()
+    assert not list((tmp_path / "usb").glob(".bgremove-*"))
+
+
+def test_copy_fallback_still_never_overwrites_and_rolls_back_cleanly(photo, tmp_path, monkeypatch, backend):
+    def no_links(source, target):
+        raise PermissionError("no links")
+
+    monkeypatch.setattr(bg.os, "link", no_links)
+    task = bg.plan_tasks([photo], tmp_path / "usb", save_mask=True)[0]
+    real_open = open
+
+    def raced_open(path, mode="r", *args, **kwargs):
+        if Path(path) == task.mask_path and "x" in mode:
+            task.mask_path.write_bytes(b"external mask")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", raced_open)
+    result = bg.BackgroundRemovalService(bg.BackgroundRemovalConfig(save_mask=True)).process(task)
+    monkeypatch.undo()
+    assert not result.success
+    assert not task.output_path.exists()
+    assert task.mask_path.read_bytes() == b"external mask"

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Optional, Union
 
@@ -22,6 +23,44 @@ try:
 except ImportError:
     pass
 
+_TESSERACT_CHECKED = False
+_EXTRA_LANGUAGES = ("fra", "ara", "deu", "spa", "ita", "por", "nld")
+
+
+def _windows_tesseract_candidates():
+    roots = [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+        os.environ.get("LOCALAPPDATA", ""),
+    ]
+    for root in roots:
+        if root:
+            yield Path(root) / "Tesseract-OCR" / "tesseract.exe"
+
+
+def _locate_tesseract() -> None:
+    """Point pytesseract at Tesseract when it is installed but not on PATH.
+
+    The common Windows installer puts Tesseract in Program Files without adding
+    it to PATH, which used to make OCR look unavailable.
+    """
+    global _TESSERACT_CHECKED
+    if _TESSERACT_CHECKED or not _PYTESSERACT_AVAILABLE:
+        return
+    _TESSERACT_CHECKED = True
+    configured = os.environ.get("TESSERACT_CMD")
+    if configured and Path(configured).is_file():
+        pytesseract.pytesseract.tesseract_cmd = configured
+        return
+    if shutil.which(pytesseract.pytesseract.tesseract_cmd):
+        return
+    if os.name == "nt":
+        for candidate in _windows_tesseract_candidates():
+            if candidate.is_file():
+                pytesseract.pytesseract.tesseract_cmd = str(candidate)
+                return
+
 
 def is_ocr_available() -> bool:
     """
@@ -30,6 +69,7 @@ def is_ocr_available() -> bool:
     """
     if not _PYTESSERACT_AVAILABLE:
         return False
+    _locate_tesseract()
     try:
         pytesseract.get_tesseract_version()
         return True
@@ -42,21 +82,72 @@ def get_ocr_status_message() -> str:
     """Return a descriptive message explaining OCR status or setup requirements."""
     if not _PYTESSERACT_AVAILABLE:
         return "pytesseract Python library is not installed."
+    _locate_tesseract()
     try:
         ver = pytesseract.get_tesseract_version()
         return f"Tesseract OCR is available (version {ver})."
     except Exception as e:
         logger.info(f"Tesseract executable not found on PATH: {e}")
         return (
-            "pytesseract is installed, but the Tesseract OCR executable was not found on PATH. "
+            "pytesseract is installed, but the Tesseract OCR executable was not found. "
             "Please install Tesseract-OCR (e.g., via winget install UB-Mannheim.TesseractOCR on Windows "
-            "or brew install tesseract on macOS)."
+            "or brew install tesseract on macOS), or set TESSERACT_CMD to tesseract.exe."
         )
+
+
+_LANG_CACHE: Optional[str] = None
+
+
+def resolve_languages(lang: Optional[str]) -> str:
+    """Turn "auto" into English plus up to two other installed languages."""
+    global _LANG_CACHE
+    if lang and lang.lower() != "auto":
+        return lang
+    if _LANG_CACHE is not None:
+        return _LANG_CACHE
+    chosen = ["eng"]
+    try:
+        installed = set(pytesseract.get_languages(config=""))
+        if "eng" not in installed and installed - {"osd"}:
+            chosen = []
+        for code in _EXTRA_LANGUAGES:
+            if code in installed and len(chosen) < 3:
+                chosen.append(code)
+        if not chosen:
+            chosen = sorted(installed - {"osd"})[:1] or ["eng"]
+    except Exception as exc:
+        logger.debug("Could not list Tesseract languages: %s", exc)
+    _LANG_CACHE = "+".join(chosen)
+    return _LANG_CACHE
+
+
+def _prepare_for_ocr(image: Image.Image) -> Image.Image:
+    """Upright, greyscale, and large enough for Tesseract's character models."""
+    from PIL import ImageOps
+
+    try:
+        image = ImageOps.exif_transpose(image) or image
+    except Exception:
+        pass
+    if image.mode in ("RGBA", "LA", "PA") or (image.mode == "P" and "transparency" in image.info):
+        rgba = image.convert("RGBA")
+        canvas = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        image = Image.alpha_composite(canvas, rgba)
+    if image.mode.startswith("I;16") or image.mode in ("I", "F"):
+        from image_converter.core.conversion.engine import _to_8bit
+        image = _to_8bit(image)
+    gray = image.convert("L")
+    # Small screenshots and phone crops OCR much better when upscaled.
+    longest = max(gray.size)
+    if longest and longest < 1500:
+        factor = min(3.0, 1500 / longest)
+        gray = gray.resize((round(gray.width * factor), round(gray.height * factor)), Image.Resampling.LANCZOS)
+    return gray
 
 
 def ocr_image_to_text(
     image_input: Union[Image.Image, str, Path],
-    lang: str = "eng",
+    lang: str = "auto",
 ) -> str:
     """
     Perform OCR on a PIL Image or image file path.
@@ -64,13 +155,16 @@ def ocr_image_to_text(
     """
     if not _PYTESSERACT_AVAILABLE:
         raise RuntimeError("pytesseract package is required for OCR.")
+    _locate_tesseract()
 
     try:
         if isinstance(image_input, (str, Path)):
             with Image.open(image_input) as img:
-                return pytesseract.image_to_string(img, lang=lang).strip()
+                img.load()
+                prepared = _prepare_for_ocr(img)
         else:
-            return pytesseract.image_to_string(image_input, lang=lang).strip()
+            prepared = _prepare_for_ocr(image_input)
+        return pytesseract.image_to_string(prepared, lang=resolve_languages(lang)).strip()
     except Exception as e:
         if "tesseract is not installed" in str(e).lower() or "not found" in str(e).lower():
             raise RuntimeError(
@@ -80,7 +174,7 @@ def ocr_image_to_text(
         raise
 
 
-def ocr_pdf_page(page: fitz.Page, dpi: int = 200, lang: str = "eng") -> str:
+def ocr_pdf_page(page: fitz.Page, dpi: int = 300, lang: str = "auto") -> str:
     """Render a single PDF page and extract text using OCR."""
     scale = dpi / 72.0
     matrix = fitz.Matrix(scale, scale)
@@ -110,8 +204,8 @@ def pdf_needs_ocr(doc: fitz.Document, sample_pages: int = 5) -> bool:
 
 def ocr_pdf_to_text(
     pdf_path: str | Path,
-    lang: str = "eng",
-    dpi: int = 200,
+    lang: str = "auto",
+    dpi: int = 300,
 ) -> str:
     """Process an entire PDF through OCR page-by-page."""
     p = Path(pdf_path)

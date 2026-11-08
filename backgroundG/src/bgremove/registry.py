@@ -136,6 +136,11 @@ def _check_model_policy(config: ModelConfig, allow_noncommercial: bool) -> None:
         raise ModelError("Register a verified SHA-256 before using this model")
 
 
+# Hashing a ~1 GB model takes seconds. A file that was fully verified in this
+# process and has not changed (same size and modification time) is not re-read.
+_VERIFIED: dict[tuple[str, int, int, str], bool] = {}
+
+
 def verify_model(
     config: ModelConfig, directory: Path | None = None, allow_noncommercial: bool = False
 ) -> Path:
@@ -146,10 +151,15 @@ def verify_model(
             f"Model missing: {path}. Run 'bgremove models pull' explicitly or copy a verified file."
         )
     try:
+        stat = path.stat()
+        identity = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, config.sha256.lower())
+        if _VERIFIED.get(identity):
+            return path
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
     except OSError as error:
         raise ModelError(f"Cannot read model {path}: {error}") from error
     if digest != config.sha256.lower():
         raise ModelError(f"Model hash mismatch: {path}")
+    _VERIFIED[identity] = True
     return path

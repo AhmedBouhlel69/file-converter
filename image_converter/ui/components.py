@@ -72,11 +72,11 @@ def get_compatible_output_formats(file_path_or_ext: str | Path) -> List[str]:
 
     # 2. Word (.docx, .doc)
     elif ext in (".docx", ".doc"):
-        return ["PDF", "TXT", "HTML", "PNG", "JPG", "ODT", "RTF", "PPTX"]
+        return ["PDF", "TXT", "HTML", "PNG", "JPG", "ODT", "RTF"]
 
     # 3. PowerPoint (.pptx)
     elif ext == ".pptx":
-        return ["PDF", "TXT", "HTML", "PNG", "JPG", "DOCX"]
+        return ["PDF", "TXT", "HTML", "PNG", "JPG"]
 
     # 4. OpenDocument (.odt)
     elif ext == ".odt":
@@ -105,6 +105,29 @@ def get_compatible_output_formats(file_path_or_ext: str | Path) -> List[str]:
             fmts.append("HEIC")
         fmts.extend(["BMP", "TIFF", "GIF", "ICO", "PDF", "TXT", "DOCX"])
         return fmts
+
+
+_FAMILIES = {
+    ".pdf": "pdf",
+    ".docx": "document", ".doc": "document", ".odt": "document", ".rtf": "document",
+    ".txt": "text",
+    ".pptx": "presentation",
+    ".csv": "spreadsheet", ".xlsx": "spreadsheet", ".xls": "spreadsheet",
+}
+_OWN_FORMAT = {".jpg": "JPG", ".jpeg": "JPG", ".jpe": "JPG", ".tif": "TIFF", ".tiff": "TIFF", ".heif": "HEIC", ".heic": "HEIC"}
+
+
+def file_family(path: Path) -> str:
+    """Broad input family used to decide whether a queue is mixed."""
+    return _FAMILIES.get(Path(path).suffix.lower(), "image")
+
+
+def default_output_format(path: Path) -> str:
+    """The most useful target for one file: its first compatible format that changes it."""
+    ext = Path(path).suffix.lower()
+    own = _OWN_FORMAT.get(ext, ext.lstrip(".").upper())
+    formats = get_compatible_output_formats(Path(path))
+    return next((fmt for fmt in formats if fmt != own), formats[0] if formats else "PDF")
 
 
 def format_bytes(size: int) -> str:
@@ -531,9 +554,10 @@ class ImagePreviewWidget(QFrame):
                 alpha_str = " (Alpha)" if meta.get("has_alpha") else ""
                 self.lbl_format.setText(f"{meta['format']} / {meta.get('mode', '')}{alpha_str}")
 
+                from image_converter.ui.queue_model import make_thumbnail
+
                 with Image.open(p) as img:
-                    img.thumbnail((300, 220), Image.Resampling.BILINEAR)
-                    pixmap = pil_to_qpixmap(img)
+                    pixmap = pil_to_qpixmap(make_thumbnail(img, (300, 220)))
                     self.preview_lbl.setPixmap(pixmap)
 
         except Exception as e:
@@ -909,7 +933,8 @@ class ConversionSettingsWidget(QFrame):
 
         layout.addWidget(self.tabs)
 
-        self._on_format_changed(self.combo_format.currentText())
+        self._on_format_changed(self.get_target_format())
+        self._format_chosen_by_user = False
 
     FORMAT_CATEGORIES = (
         ("Mixed queue", ("PER_FILE",)),
@@ -930,7 +955,7 @@ class ConversionSettingsWidget(QFrame):
         if normalized == getattr(self, "_available_formats", None) and self.combo_format.count():
             return
 
-        previous = (preferred or self.combo_format.currentText() or "JPG").upper()
+        previous = (preferred or self.get_target_format() or "JPG").upper()
         self._available_formats = normalized
         model = QStandardItemModel(self.combo_format)
         first_format_index = -1
@@ -946,7 +971,7 @@ class ConversionSettingsWidget(QFrame):
             header.setFont(font)
             model.appendRow(header)
             for fmt in available:
-                item = QStandardItem(fmt)
+                item = QStandardItem("Best for each file" if fmt == "PER_FILE" else fmt)
                 item.setData(fmt, Qt.ItemDataRole.UserRole)
                 model.appendRow(item)
                 if first_format_index < 0:
@@ -954,7 +979,9 @@ class ConversionSettingsWidget(QFrame):
 
         self.combo_format.blockSignals(True)
         self.combo_format.setModel(model)
-        desired = self.combo_format.findText(previous)
+        desired = self.combo_format.findData(previous, Qt.ItemDataRole.UserRole)
+        if desired < 0:
+            desired = self.combo_format.findText(previous)
         self.combo_format.setCurrentIndex(desired if desired >= 0 else first_format_index)
         self.combo_format.blockSignals(False)
 
@@ -965,11 +992,15 @@ class ConversionSettingsWidget(QFrame):
         has_documents: bool,
         estimated_size: Optional[int],
         mixed_queue: bool = False,
+        natural_default: Optional[str] = None,
     ):
         """Make tabs, formats, and estimates reflect the current queue."""
         current = self.get_target_format()
         available = ["PER_FILE"] if mixed_queue else (formats or get_supported_output_formats())
-        self.set_available_formats(available, preferred=current)
+        if not formats and not mixed_queue:
+            self._format_chosen_by_user = False
+        keep = getattr(self, "_format_chosen_by_user", False) and current in available
+        self.set_available_formats(available, preferred=current if keep else (natural_default or current))
         self.tabs.tabBar().setTabVisible(1, has_images)
         self.tabs.tabBar().setTabVisible(2, has_documents)
         self.set_estimated_size(estimated_size)
@@ -994,8 +1025,9 @@ class ConversionSettingsWidget(QFrame):
             self.combo_format.setCurrentText(selected)
         self.slider_quality.setValue(quality)
 
-    def _on_format_changed(self, fmt: str):
-        self._update_format_controls(fmt)
+    def _on_format_changed(self, _text: str):
+        self._format_chosen_by_user = True
+        self._update_format_controls(self.get_target_format())
         self.settings_changed.emit()
 
     def _update_format_controls(self, fmt: str):
@@ -1013,8 +1045,8 @@ class ConversionSettingsWidget(QFrame):
             "JSON": "Structured text output for software workflows.",
             "HTML": "Web-ready document or tabular output.",
             "STRIP_METADATA": "Keep the file format while removing supported metadata.",
-            "PPTX": "PowerPoint output. Some advertised input routes are unavailable and may report unsupported.",
-            "PER_FILE": "This mixed queue has no single common output. Each row keeps its compatible target.",
+            "PPTX": "PowerPoint output: text becomes slides; PDF pages become full-slide pictures.",
+            "PER_FILE": "Different kinds of files: each row gets its own best target. Change any row in the queue.",
         }
         self.lbl_format_summary.setText(
             descriptions.get(fmt, f"Convert compatible queue items to {fmt}.")
@@ -1066,7 +1098,8 @@ class ConversionSettingsWidget(QFrame):
             self.line_out_dir.setText(folder)
 
     def get_target_format(self) -> str:
-        return self.combo_format.currentText().upper()
+        code = self.combo_format.currentData(Qt.ItemDataRole.UserRole)
+        return str(code).upper() if code else self.combo_format.currentText().upper()
 
     def get_output_directory(self) -> Optional[Path]:
         if self.radio_custom_dir.isChecked():

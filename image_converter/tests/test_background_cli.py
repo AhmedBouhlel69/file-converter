@@ -224,3 +224,21 @@ def test_background_file_failure_returns_nonzero(photo, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "Model missing" in captured.err
     assert "0 succeeded, 1 failed" in captured.out
+
+
+def test_background_quality_flags_and_auto_model(photo, tmp_path, service_calls):
+    destination = tmp_path / "cutout.png"
+    assert main([
+        str(photo), "--remove-background", "-o", str(destination),
+        "--bg-model", "auto", "--bg-accurate", "--bg-no-clean-edges",
+    ]) == 0
+    config = service_calls["configs"][0]
+    assert config.model == "auto"
+    assert config.accurate is True
+    assert config.clean_edges is False
+
+
+def test_background_clean_edges_default_on(photo, tmp_path, service_calls):
+    assert main([str(photo), "--remove-background", "-o", str(tmp_path / "cutout.png")]) == 0
+    config = service_calls["configs"][0]
+    assert config.clean_edges is True and config.accurate is False

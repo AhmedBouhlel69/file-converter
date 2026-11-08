@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -52,6 +53,57 @@ try:
     _REPORTLAB_AVAILABLE = True
 except ImportError:
     pass
+
+
+_PUA_BULLETS = {"\uf0b7": "•", "\uf0a7": "▪", "\uf076": "❖", "\uf0d8": "➢", "\uf0fc": "✓", "\uf0e8": "➔", "\uf02d": "-", "\uf06f": "o"}
+
+
+_LIST_MARKER = re.compile(r"^(?:[•·▪◦‣∙●○■□➢✓❖o\-–—*]|\(?[0-9]{1,3}[.)]|\(?[a-zA-Z][.)]|[ivxlcdm]{1,5}[.)])$")
+
+
+def _clean_extracted_text(text: str) -> str:
+    """Map Symbol/Wingdings private-use bullets to real characters and trim."""
+    for code, char in _PUA_BULLETS.items():
+        text = text.replace(code, char)
+    text = "".join(ch for ch in text if not ("\ue000" <= ch <= "\uf8ff"))
+    lines = [line.rstrip() for line in text.splitlines()]
+    # PDF writers often place a list marker and its text as separate lines.
+    joined: List[str] = []
+    for line in lines:
+        if joined and _LIST_MARKER.match(joined[-1].strip()) and line.strip():
+            joined[-1] = f"{joined[-1].strip()} {line.strip()}"
+        else:
+            joined.append(line)
+    return "\n".join(joined).strip()
+
+
+def free_series_stem(out_dir: Path, base_stem: str, word: str, ext: str, count: int) -> str:
+    """Pick a stem whose ``{stem}_{word}_N{ext}`` files do not exist yet.
+
+    Multi-page exports never overwrite the pages of an earlier export.
+    """
+    stem, counter = base_stem, 2
+    while any((out_dir / f"{stem}_{word}_{n}{ext}").exists() for n in range(1, count + 1)):
+        stem = f"{base_stem} ({counter})"
+        counter += 1
+    return stem
+
+
+def save_pixmap(pix, dest: Path, target_format: str, dpi: int = 150) -> None:
+    """Save a rendered page in the requested format with sensible quality."""
+    fmt = target_format.upper()
+    if fmt == "PNG":
+        pix.save(str(dest))
+        return
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    if fmt in ("JPG", "JPEG"):
+        img.save(str(dest), format="JPEG", quality=92, optimize=True, subsampling=0, dpi=(dpi, dpi))
+    elif fmt == "WEBP":
+        img.save(str(dest), format="WEBP", quality=90, method=4)
+    elif fmt == "TIFF":
+        img.save(str(dest), format="TIFF", compression="tiff_deflate", dpi=(dpi, dpi))
+    else:
+        img.save(str(dest), format=fmt)
 
 
 def open_pdf_with_password(pdf_path: str | Path, password: Optional[str] = None) -> fitz.Document:
@@ -219,6 +271,10 @@ class DocumentConverter:
             base_stem = in_p.stem
             out_dir = out_p
 
+        valid_pages = [p for p in pages_to_render if 0 <= p < total_pages]
+        if not (len(pages_to_render) == 1 and out_p.suffix):
+            base_stem = free_series_stem(out_dir, base_stem, "page", ext, max(valid_pages, default=0) + 1)
+
         for idx, page_idx in enumerate(pages_to_render):
             if 0 <= page_idx < total_pages:
                 page = doc[page_idx]
@@ -232,17 +288,72 @@ class DocumentConverter:
                     dest = out_dir / f"{base_stem}_page_{page_idx + 1}{ext}"
 
                 # Save directly via PyMuPDF or Pillow for format versatility
-                if target_format.upper() in ("PNG", "JPG", "JPEG"):
-                    pix.save(str(dest))
-                else:
-                    # Use PIL for other formats like WEBP, BMP, TIFF
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    img.save(str(dest), format=target_format.upper())
+                save_pixmap(pix, dest, target_format, dpi)
 
                 generated_files.append(dest)
 
         doc.close()
         return generated_files
+
+    def convert_pdf_to_pptx(
+        self,
+        pdf_path: str | Path,
+        output_path: str | Path,
+        password: Optional[str] = None,
+        dpi: int = 200,
+    ) -> Path:
+        """One slide per page: the page as a sharp full-slide picture.
+
+        The page text goes into the speaker notes so it stays searchable and
+        can be copied while presenting.
+        """
+        import io
+
+        from pptx import Presentation
+        from pptx.util import Emu
+
+        in_p = Path(pdf_path).resolve()
+        out_p = Path(output_path).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        doc = open_pdf_with_password(in_p, password=password)
+        try:
+            if not len(doc):
+                raise ValueError(f"'{in_p.name}' has no pages.")
+            first = doc[0].rect
+            prs = Presentation()
+            prs.slide_width = Emu(int(first.width * 12700))
+            prs.slide_height = Emu(int(first.height * 12700))
+            blank = prs.slide_layouts[6]
+            scale = dpi / 72.0
+            for page in doc:
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=90, subsampling=0, optimize=True)
+                buf.seek(0)
+                slide = prs.slides.add_slide(blank)
+                # Fit the page inside the slide, centred, keeping its aspect ratio.
+                ratio = min(prs.slide_width / (page.rect.width * 12700), prs.slide_height / (page.rect.height * 12700))
+                width = int(page.rect.width * 12700 * ratio)
+                height = int(page.rect.height * 12700 * ratio)
+                slide.shapes.add_picture(
+                    buf, (prs.slide_width - width) // 2, (prs.slide_height - height) // 2, width=width, height=height
+                )
+                text = _clean_extracted_text(page.get_text("text"))
+                if text:
+                    from image_converter.core.text_io import xml_safe
+
+                    slide.notes_slide.notes_text_frame.text = xml_safe(text)
+            temp = out_p.with_name(f".tmp_pptx_{os.getpid()}_{time.time_ns()}_{out_p.name}")
+            try:
+                prs.save(str(temp))
+                os.replace(temp, out_p)
+            finally:
+                if temp.exists():
+                    temp.unlink()
+        finally:
+            doc.close()
+        return out_p
 
     def convert_pdf_to_docx(
         self,
@@ -260,9 +371,9 @@ class DocumentConverter:
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
         # Primary: pdf2docx Converter
-        if self.has_pdf2docx and not password:
+        if self.has_pdf2docx:
             try:
-                cv = PDF2DocxConverter(str(in_p))
+                cv = PDF2DocxConverter(str(in_p), password=password) if password else PDF2DocxConverter(str(in_p))
                 cv.convert(str(out_p))
                 cv.close()
                 if out_p.is_file() and out_p.stat().st_size > 0:
@@ -331,28 +442,63 @@ class DocumentConverter:
         output_path: str | Path,
         password: Optional[str] = None,
         enable_ocr: bool = False,
+        ocr_language: str = "auto",
     ) -> Path:
-        """Extract all textual content from a PDF into a UTF-8 text file, with optional OCR fallback."""
+        """Extract text in reading order; scanned pages are OCR'd when possible.
+
+        Pages without a text layer are recognised with Tesseract when OCR is
+        enabled, or automatically when the whole document looks scanned.
+        """
         in_p = Path(pdf_path).resolve()
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
         doc = open_pdf_with_password(in_p, password=password)
         full_text: List[str] = []
+        ocr_pages = 0
+        missing_pages: List[int] = []
+        flags = (
+            fitz.TEXT_PRESERVE_WHITESPACE
+            | fitz.TEXT_MEDIABOX_CLIP
+            | getattr(fitz, "TEXT_DEHYPHENATE", 0)
+        )
+        try:
+            from image_converter.core.ocr_engine import is_ocr_available, ocr_pdf_page, pdf_needs_ocr
+            ocr_ready = is_ocr_available()
+            auto_ocr = ocr_ready and pdf_needs_ocr(doc)
+        except Exception:
+            ocr_ready = auto_ocr = False
+        try:
+            for idx, page in enumerate(doc, 1):
+                page_text = _clean_extracted_text(page.get_text("text", flags=flags))
+                if not page_text and (enable_ocr or auto_ocr):
+                    if ocr_ready:
+                        try:
+                            page_text = ocr_pdf_page(page, lang=ocr_language).strip()
+                            ocr_pages += 1 if page_text else 0
+                        except Exception as e:
+                            logger.warning(f"OCR failed on page {idx} of {in_p.name}: {e}", exc_info=True)
+                if page_text:
+                    full_text.append(f"--- Page {idx} ---\n{page_text}\n")
+                else:
+                    missing_pages.append(idx)
+        finally:
+            doc.close()
 
-        for idx, page in enumerate(doc, 1):
-            page_text = page.get_text("text").strip()
-            if not page_text and enable_ocr:
-                try:
-                    from image_converter.core.ocr_engine import is_ocr_available, ocr_pdf_page
-                    if is_ocr_available():
-                        page_text = ocr_pdf_page(page).strip()
-                except Exception as e:
-                    logger.warning(f"OCR failed on page {idx} of {in_p.name}: {e}", exc_info=True)
-            if page_text:
-                full_text.append(f"--- Page {idx} ---\n{page_text}\n")
-
-        doc.close()
+        if not full_text:
+            if ocr_ready:
+                raise ValueError(f"No text was found in '{in_p.name}', even with OCR.")
+            raise ValueError(
+                f"'{in_p.name}' has no selectable text (it looks like a scan). "
+                "Install Tesseract OCR to extract text from scanned pages."
+            )
+        self.last_table_warning = None
+        notes = []
+        if ocr_pages:
+            notes.append(f"OCR was used on {ocr_pages} scanned page{'s' if ocr_pages != 1 else ''}; check names and numbers.")
+        if missing_pages and len(missing_pages) < 20:
+            notes.append(f"No text found on page(s) {', '.join(map(str, missing_pages))}.")
+        self.last_table_warning = " ".join(notes) or None
         out_p.write_text("\n".join(full_text), encoding="utf-8")
         return out_p
 
@@ -644,7 +790,9 @@ class DocumentConverter:
                     if out_p.is_file() and out_p.stat().st_size > 0:
                         return out_p
 
-        raise RuntimeError("Native DOCX to PDF conversion requires Microsoft Word on Windows.")
+        from image_converter.core.platform.libreoffice import fallback_or_raise
+
+        return fallback_or_raise(in_p, out_p, "PDF", "Native DOCX to PDF conversion requires Microsoft Word on Windows.")
 
     def convert_docx_to_text(
         self,
@@ -660,22 +808,10 @@ class DocumentConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
+        from .docx_render import blocks_to_text, read_blocks
+
         doc = docx.Document(str(in_p))
-        lines: List[str] = []
-
-        for p in doc.paragraphs:
-            txt = p.text.strip()
-            if txt:
-                lines.append(txt)
-
-        for tbl in doc.tables:
-            lines.append("\n[Table]")
-            for row in tbl.rows:
-                row_str = " | ".join(cell.text.strip() for cell in row.cells)
-                lines.append(row_str)
-            lines.append("")
-
-        out_p.write_text("\n\n".join(lines), encoding="utf-8")
+        out_p.write_text(blocks_to_text(read_blocks(doc)), encoding="utf-8")
         return out_p
 
     def convert_docx_to_html(
@@ -692,40 +828,17 @@ class DocumentConverter:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
+        from .docx_render import blocks_to_html, read_blocks
+
         doc = docx.Document(str(in_p))
-        body_elements: List[str] = []
-
-        for p in doc.paragraphs:
-            txt = html.escape(p.text.strip())
-            if not txt:
-                continue
-            style_name = (p.style.name if p.style else "").lower()
-            if "heading 1" in style_name:
-                body_elements.append(f"<h1>{txt}</h1>")
-            elif "heading 2" in style_name:
-                body_elements.append(f"<h2>{txt}</h2>")
-            elif "heading 3" in style_name:
-                body_elements.append(f"<h3>{txt}</h3>")
-            else:
-                body_elements.append(f"<p>{txt}</p>")
-
-        for tbl in doc.tables:
-            tbl_html = ['<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; margin: 16px 0;">']
-            for r_idx, row in enumerate(tbl.rows):
-                tbl_html.append("  <tr>")
-                tag = "th" if r_idx == 0 else "td"
-                for cell in row.cells:
-                    c_txt = html.escape(cell.text.strip())
-                    tbl_html.append(f"    <{tag}>{c_txt}</{tag}>")
-                tbl_html.append("  </tr>")
-            tbl_html.append("</table>")
-            body_elements.append("\n".join(tbl_html))
+        body_elements: List[str] = [blocks_to_html(read_blocks(doc, images=True))]
 
         doc_title = html.escape(in_p.stem)
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{doc_title}</title>
   <style>
     body {{
@@ -736,10 +849,13 @@ class DocumentConverter:
       margin: 40px auto;
       padding: 0 20px;
     }}
-    h1, h2, h3 {{ color: #111827; }}
-    table {{ width: 100%; border-color: #e5e7eb; }}
-    th {{ background: #f3f4f6; text-align: left; }}
+    h1, h2, h3, h4, h5, h6 {{ color: #111827; line-height: 1.25; }}
+    table {{ width: 100%; border-collapse: collapse; margin: 16px 0; }}
+    th, td {{ border: 1px solid #d1d5db; padding: 6px 10px; text-align: start; vertical-align: top; }}
+    th {{ background: #f3f4f6; }}
     p {{ margin: 0.8em 0; }}
+    img {{ max-width: 100%; height: auto; }}
+    li {{ margin: 0.25em 0; }}
   </style>
 </head>
 <body>

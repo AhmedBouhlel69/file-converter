@@ -79,6 +79,10 @@ def main(
     guided_eps: float = 0.001,
     matting: bool = False,
     two_pass: bool = False,
+    clean_edges: bool = False,
+    levels_low: float = 0.0,
+    levels_high: float = 1.0,
+    accurate: bool = False,
     jobs: int = 1,
     threads: int = 0,
     recursive: bool = False,
@@ -99,6 +103,9 @@ def main(
             guided_radius=guided_radius,
             guided_eps=guided_eps,
             matting=matting,
+            decontaminate=clean_edges,
+            levels_low=levels_low,
+            levels_high=levels_high,
         )
         composition = ComposeOptions(
             bg_color=bg_color,
@@ -131,7 +138,7 @@ def main(
         results = run_batch(
             items,
             config,
-            BatchOptions(refinement, composition, two_pass, overwrite, keep_metadata),
+            BatchOptions(refinement, composition, two_pass, overwrite, keep_metadata, accurate),
             jobs=jobs,
         )
         for result in results:

@@ -38,6 +38,7 @@ class BatchOptions:
     two_pass: bool = False
     overwrite: bool = False
     keep_metadata: bool = False
+    tta: bool = False
 
 
 def _safe_stem(stem: str) -> str:
@@ -156,6 +157,7 @@ def _process(
             refinement=options.refinement,
             composition=options.composition,
             two_pass=options.two_pass,
+            tta=options.tta,
         )
         if item.image is not None:
             _validate_target(item.image, item.output_root, protected_sources, item.source)

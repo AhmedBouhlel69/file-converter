@@ -229,6 +229,7 @@ def test_image_compress_dialog_creates_smaller_webp(qapp, tmp_path: Path, monkey
     dlg.spin_max_height.setValue(600)
 
     dlg._execute_compress()
+    dlg.wait_until_done()
 
     output = out_dir / "large_photo_compressed.webp"
     assert not crit_messages

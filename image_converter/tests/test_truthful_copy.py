@@ -190,7 +190,7 @@ def test_constructed_pages_do_not_contain_old_guarantees(qapp):
 def test_footer_describes_current_destination_without_preservation_promise(qapp, tmp_path):
     window = ImageConverterMainWindow()
     assert "same folder as each source" in window.lbl_status_hint.text()
-    assert "Existing destination files may be replaced" in window.lbl_status_hint.text()
+    assert "Existing files are never replaced" in window.lbl_status_hint.text()
     window.settings_widget.radio_custom_dir.setChecked(True)
     window.settings_widget.line_out_dir.setText(str(tmp_path))
     window._refresh_queue_ui()
@@ -304,6 +304,7 @@ def test_image_compressor_fallback_is_unchanged_and_reports_retained_metadata(qa
 
     monkeypatch.setattr(dialog.engine, "convert_single", larger_conversion)
     dialog._execute_compress()
+    dialog.wait_until_done()
     destination = tmp_path / "outputs" / "original_compressed.jpg"
     assert destination.read_bytes() == source.read_bytes()
     assert "unchanged copy saved" in messages[0]
@@ -330,6 +331,7 @@ def test_larger_cross_format_output_reports_increase(qapp, tmp_path, monkeypatch
 
     monkeypatch.setattr(dialog.engine, "convert_single", larger_conversion)
     dialog._execute_compress()
+    dialog.wait_until_done()
     assert "% larger" in dialog.lbl_result.text()
     assert dialog.lbl_result.property("state") == "warning"
     dialog.close()

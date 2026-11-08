@@ -10,19 +10,24 @@ import importlib
 import logging
 import math
 import os
+import shutil
 import sys
 import tempfile
 import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from PIL import Image, ImageColor
 
 from .conversion.engine import ConversionResult
 
 MODEL_PROFILES = ("fast", "balanced", "quality", "portrait")
+# "auto" picks the best lightweight profile that is actually installed. The two
+# BiRefNet profiles are never chosen automatically because they need >= 8 GiB free RAM.
+MODEL_CHOICES = ("auto", *MODEL_PROFILES)
+_AUTO_ORDER = ("balanced", "fast")
 _MODEL_FILES = {
     "fast": "u2netp.onnx",
     "balanced": "isnet-general-use.onnx",
@@ -57,10 +62,15 @@ class BackgroundRemovalConfig:
     two_pass: bool = False
     save_mask: bool = False
     keep_metadata: bool = False
+    # Recover true subject colours at soft edges so no halo of the old background
+    # remains, and clear the colour data hidden under transparent pixels.
+    clean_edges: bool = True
+    # Average the prediction with its mirror image: slower (2x) but steadier edges.
+    accurate: bool = False
 
     def __post_init__(self) -> None:
-        if self.model not in MODEL_PROFILES:
-            raise ValueError(f"Model must be one of: {', '.join(MODEL_PROFILES)}")
+        if self.model not in MODEL_CHOICES:
+            raise ValueError(f"Model must be one of: {', '.join(MODEL_CHOICES)}")
         object.__setattr__(self, "output_format", _output_format(self.output_format))
         if self.model_dir is not None:
             object.__setattr__(self, "model_dir", Path(self.model_dir).expanduser().resolve())
@@ -70,7 +80,7 @@ class BackgroundRemovalConfig:
                     raise ValueError()
             except (TypeError, ValueError):
                 raise ValueError("Background color must be an RGB color, for example #ffffff") from None
-        for name in ("crop", "two_pass", "save_mask", "keep_metadata"):
+        for name in ("crop", "two_pass", "save_mask", "keep_metadata", "clean_edges", "accurate"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         if type(self.padding) is not int or self.padding < 0:
@@ -114,6 +124,34 @@ def _occupied(path: Path, reserved: set[str]) -> bool:
     return _key(path) in reserved or os.path.lexists(path)
 
 
+def _link_exclusive(temporary: Path, target: Path) -> None:
+    """Publish ``temporary`` as ``target`` without ever replacing an existing file.
+
+    A hard link is atomic. FAT/exFAT drives and some network or cloud-sync folders
+    cannot create them, so those fall back to exclusive creation plus a copy.
+    """
+    try:
+        os.link(temporary, target)
+        return
+    except FileExistsError:
+        raise
+    except OSError:
+        pass
+    with open(target, "xb") as destination:  # FileExistsError if someone else won the race
+        try:
+            with open(temporary, "rb") as source:
+                shutil.copyfileobj(source, destination, 1024 * 1024)
+        except BaseException:
+            destination.close()
+            target.unlink(missing_ok=True)
+            raise
+
+
+def _signature(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def _check_input_path(path: Path) -> None:
     if path.suffix.lower() not in IMAGE_EXTENSIONS:
         raise ValueError(f"Unsupported background-removal input: {path.name}. Use JPEG, PNG, WEBP, BMP or TIFF.")
@@ -129,11 +167,14 @@ def plan_tasks(
     explicit_output: str | Path | None = None,
     save_mask: bool = False,
     input_root: str | Path | None = None,
+    default_dirs: Mapping[str | Path, str | Path] | None = None,
 ) -> list[BackgroundRemovalTask]:
     """Plan unique output pairs without writing anything or loading image pixels.
 
 Existing inputs/outputs and other planned outputs are all reserved. Corrupt or
 overlimit images are reported by ``process`` so other batch items can succeed.
+``default_dirs`` maps a source to the folder used when no output folder is chosen
+(pasted images have no meaningful folder of their own).
     """
     fmt = _output_format(output_format)
     sources = list(dict.fromkeys(Path(p).expanduser().resolve() for p in inputs))
@@ -145,6 +186,10 @@ overlimit images are reported by ``process`` so other batch items can succeed.
         raise ValueError("Choose an output directory or an explicit output file")
     root = Path(input_root).expanduser().resolve() if input_root is not None else None
     destination = Path(output_dir).expanduser().resolve() if output_dir is not None else None
+    fallback = {
+        Path(key).expanduser().resolve(): Path(value).expanduser().resolve()
+        for key, value in (default_dirs or {}).items()
+    }
     reserved = {_key(p) for p in sources}
     tasks = []
     for source in sources:
@@ -154,7 +199,10 @@ overlimit images are reported by ``process`` so other batch items can succeed.
                 relative_parent = source.relative_to(root).parent
             except ValueError:
                 raise ValueError(f"Input is outside input_root: {source}") from None
-        parent = destination / relative_parent if destination is not None else source.parent
+        if destination is not None:
+            parent = destination / relative_parent
+        else:
+            parent = fallback.get(source, source.parent)
         if explicit_output is not None:
             output = _absolute(explicit_output)
             if output.suffix.lower() != f".{fmt.lower()}":
@@ -199,6 +247,37 @@ profiles installed in the user's model cache. Full verification stays lazy.
     return workspace if (workspace / _MODEL_FILES[model]).is_file() else None
 
 
+def _cache_directory() -> Path | None:
+    """The default bgremove model cache, without importing ONNX/OpenCV."""
+    try:
+        from platformdirs import user_cache_dir
+    except ImportError:
+        return None
+    return Path(user_cache_dir("bgremove"))
+
+
+def _profile_location(profile: str, model_dir: str | Path | None = None) -> Path | None:
+    """Return the folder that contains this profile's file, or ``None`` if absent."""
+    folder = resolve_model_directory(model_dir, profile)
+    if folder is None:
+        folder = _cache_directory()
+    try:
+        return folder if folder is not None and (folder / _MODEL_FILES[profile]).is_file() else None
+    except OSError:
+        return None
+
+
+def installed_profiles(model_dir: str | Path | None = None) -> list[str]:
+    """Profiles whose model file is present. Hashes are still verified lazily on use."""
+    return [profile for profile in MODEL_PROFILES if _profile_location(profile, model_dir)]
+
+
+def auto_candidates(model_dir: str | Path | None = None) -> list[str]:
+    """Installed profiles that ``auto`` may use, best first."""
+    present = set(installed_profiles(model_dir))
+    return [profile for profile in _AUTO_ORDER if profile in present]
+
+
 def _source_info(path: Path) -> tuple[str, tuple[int, int], int]:
     _check_input_path(path)
     size = path.stat().st_size
@@ -224,6 +303,8 @@ class BackgroundRemovalService:
         self._backend = None
         self._remover = None
         self._initialization_error: str | None = None
+        # The profile actually in use; differs from the configured one for "auto".
+        self.active_model: str | None = None
 
     def _initialize(self) -> None:
         if self._initialization_error is not None:
@@ -241,15 +322,35 @@ class BackgroundRemovalService:
                     "'python -m pip install -r image_converter/requirements-background.txt'. "
                     f"Details: {exc}"
                 ) from exc
-            remover = backend.Remover(
-                model=self.config.model,
-                device="cpu",
-                model_dir=resolve_model_directory(self.config.model_dir, self.config.model),
-                threads=2,
-            )
-            # Initialize once here so failed sessions are not retried for each file.
-            remover.warmup()
-            self._backend, self._remover = backend, remover
+            if self.config.model == "auto":
+                candidates = auto_candidates(self.config.model_dir)
+                if not candidates:
+                    raise RuntimeError(
+                        "No background-removal model is installed. Install one with "
+                        "'bgremove models pull balanced' (needs internet once) or choose a "
+                        "model folder in the advanced settings."
+                    )
+            else:
+                candidates = [self.config.model]
+            failures: list[str] = []
+            for profile in candidates:
+                try:
+                    remover = backend.Remover(
+                        model=profile,
+                        device="cpu",
+                        model_dir=resolve_model_directory(self.config.model_dir, profile),
+                        threads=2,
+                    )
+                    # Initialize once here so failed sessions are not retried for each file.
+                    remover.warmup()
+                except Exception as exc:
+                    failures.append(f"{profile}: {exc}")
+                    if len(candidates) == 1:
+                        raise
+                    continue
+                self._backend, self._remover, self.active_model = backend, remover, profile
+                return
+            raise RuntimeError("; ".join(failures))
         except Exception as exc:
             self._initialization_error = f"Cannot initialize background removal ({self.config.model}): {exc}"
             raise RuntimeError(self._initialization_error) from exc
@@ -296,11 +397,16 @@ class BackgroundRemovalService:
             self._initialize()
             if cancel_check is not None and cancel_check():
                 raise RuntimeError("Background removal cancelled")
+            refine_options = {"feather_sigma": self.config.feather, "edge_shift": self.config.edge_shift}
+            if self.config.clean_edges:
+                refine_options["decontaminate"] = True
+            extra = {"tta": True} if self.config.accurate else {}
             removed = self._remover.remove(
                 task.input_path,
-                refinement=self._backend.RefineOptions(feather_sigma=self.config.feather, edge_shift=self.config.edge_shift),
+                refinement=self._backend.RefineOptions(**refine_options),
                 composition=self._backend.ComposeOptions(bg_color=self.config.bg_color, crop=self.config.crop, padding=self.config.padding),
                 two_pass=self.config.two_pass,
+                **extra,
             )
             result.output_dimensions = removed.rgba.size
             self._publish(removed, task, cancel_check)
@@ -313,7 +419,7 @@ class BackgroundRemovalService:
 
     def _publish(self, removed, task: BackgroundRemovalTask, cancel_check) -> None:
         staged: list[tuple[Path, Path]] = []
-        published: list[tuple[Path, Path]] = []
+        published: list[tuple[Path, tuple[int, int, int, int]]] = []
         try:
             if cancel_check is not None and cancel_check():
                 raise RuntimeError("Background removal cancelled; no outputs were saved")
@@ -332,14 +438,14 @@ class BackgroundRemovalService:
             if cancel_check is not None and cancel_check():
                 raise RuntimeError("Background removal cancelled; no outputs were saved")
             for temporary, target in staged:
-                # Atomic publication with exclusive creation, including race checks.
-                os.link(temporary, target)
-                published.append((temporary, target))
+                # Exclusive creation, including race checks; never replaces a file.
+                _link_exclusive(temporary, target)
+                published.append((target, _signature(target)))
         except Exception:
-            for temporary, target in reversed(published):
+            for target, signature in reversed(published):
                 # Never remove a pre-existing or concurrently replaced file.
                 try:
-                    if os.path.samefile(temporary, target):
+                    if _signature(target) == signature:
                         target.unlink()
                 except FileNotFoundError:
                     pass

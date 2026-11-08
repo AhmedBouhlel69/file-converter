@@ -50,7 +50,9 @@ Convert between **PDF, Word (DOCX), Excel (XLSX), PowerPoint (PPTX), OpenDocumen
   - Reuses the same hardened conversion engine, output validation, and local-only processing as normal image conversion.
 - **Background Removal Page**:
   - A separate desktop page for local batch cutouts, before/after previews, transparent PNG or lossless WebP, and optional grayscale masks.
-  - Uses the optional `backgroundG` module on CPU with the small `fast` model by default; originals and existing outputs are protected.
+  - Uses the optional `backgroundG` module on CPU. **Auto** picks Balanced when installed, otherwise Fast; originals and existing outputs are protected.
+  - **Paste** a screenshot or copied picture straight into the queue with Ctrl+V, then remove the background and copy the cutout back out.
+  - **Clean edges** removes the old background's colour halo and clears the picture data hidden under transparent pixels.
 - **Native PDF Toolkit**:
   - **Merge**: Combine multiple PDFs and images into a single cohesive PDF with optional hierarchical bookmark/TOC generation and atomic writes.
   - **Split**: Extract exact page ranges or burst documents into individual single-page files with strict range validation.
@@ -132,6 +134,31 @@ choose a local model and output folder, adjust optional edge/crop settings, and 
 the batch. The worker reuses one CPU model session, reports each file, and supports
 cancellation between images. Select a result to compare the source and cutout.
 
+### Paste, then cut out
+
+Press **Ctrl+V** (or click **Paste image**) on the Remove Background page to add whatever
+is on the clipboard: a screenshot, a picture copied from a browser or editor, or image
+files copied in Explorer. Dragging a picture from a browser works too. A pasted bitmap is
+stored as a PNG in a private scratch folder (transparency is kept) and its cutout is saved
+to **Pictures\Background Removed** unless you choose another output folder. The scratch
+copy is deleted when you remove it from the queue, clear the queue, or close the app, and
+leftovers older than two days are purged on the next start. Tick **Copy result when done**
+to have a single finished cutout copied for an immediate Ctrl+V into another app.
+On the Convert pages Ctrl+V adds copied files, or saves a pasted picture to
+**Pictures\Pasted Images** and queues it.
+
+### Quality options
+
+- **Model: Auto** uses Balanced when its file is installed and falls back to Fast. It never
+  chooses the Quality/Portrait profiles, which need at least 8 GiB of free RAM.
+- **Clean edges** (on by default) estimates the true subject colour at soft edges so the
+  cutout has no halo on a new background, and blanks the colour data that PNG files
+  otherwise keep under fully transparent pixels. Without it, stripping the alpha channel
+  of a cutout can reveal the removed background.
+- **High accuracy** averages the prediction with its mirror image. It takes about twice as
+  long and mainly helps uncertain edges and leftover patches.
+- Colour picker for a solid background fill under *Advanced settings*.
+
 Select a completed image and click **Copy image** above the result, right-click the
 result and choose **Copy image**, or press **Ctrl+C** while the image queue or result
 preview has focus. Paste with **Ctrl+V** in an image editor, document, chat, or folder
@@ -201,6 +228,9 @@ python launch_converter.py photo.jpg --remove-background -o cutout.webp --save-m
 
 # Recursive batches retain relative subdirectories in the destination.
 python launch_converter.py -i photos --remove-background -r -o cutouts
+
+# Use the best installed model, average with the mirror image, and skip halo removal.
+python launch_converter.py photo.jpg --remove-background --bg-model auto --bg-accurate --bg-no-clean-edges
 
 # Optional edge refinement, foreground crop, and a solid background fill.
 python launch_converter.py photo.jpg --remove-background --bg-two-pass --bg-feather 0.8 --bg-edge-shift -1 --bg-crop --bg-padding 20 --bg-fill-color '#ffffff'

@@ -20,6 +20,13 @@ class RefineOptions:
     guided_radius: int = 0
     guided_eps: float = 1e-3
     matting: bool = False
+    # Recover true foreground colours at soft edges (removes halos left by the
+    # old background) and clear the colour data hidden under transparent pixels.
+    decontaminate: bool = False
+    # Stretch alpha between these points: values <= low become transparent and
+    # values >= high become opaque. This removes faint ghosting from soft masks.
+    levels_low: float = 0.0
+    levels_high: float = 1.0
 
     def __post_init__(self) -> None:
         if self.threshold is not None:
@@ -31,8 +38,13 @@ class RefineOptions:
         _number("guided_eps", self.guided_eps, 0)
         if self.guided_eps == 0:
             raise ValueError("guided_eps must be greater than zero")
-        if not isinstance(self.matting, bool):
-            raise TypeError("matting must be a boolean")
+        for name in ("matting", "decontaminate"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a boolean")
+        _number("levels_low", self.levels_low, 0, 1)
+        _number("levels_high", self.levels_high, 0, 1)
+        if self.levels_low >= self.levels_high:
+            raise ValueError("levels_low must be smaller than levels_high")
 
 
 def _number(name: str, value: float, minimum: float, maximum: float | None = None) -> None:
@@ -88,6 +100,11 @@ def refine(
         alpha = (alpha >= options.threshold).astype(np.float32)
     if options.min_blob_ratio:
         alpha = _cleanup(alpha, options.min_blob_ratio)
+    if options.levels_low > 0 or options.levels_high < 1:
+        span = np.float32(options.levels_high - options.levels_low)
+        alpha = np.asarray(
+            np.clip((alpha - np.float32(options.levels_low)) / span, 0, 1), dtype=np.float32
+        )
     if options.edge_shift:
         radius = abs(options.edge_shift)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1,) * 2)
@@ -99,6 +116,8 @@ def refine(
         alpha = _guided(rgb, alpha, options.guided_radius, options.guided_eps)
     if options.matting:
         return _matte(rgb, alpha)
+    if options.decontaminate:
+        return alpha, estimate_foreground(rgb, alpha)
     return alpha, None
 
 
@@ -222,3 +241,71 @@ def _matte(
             cv2.resize(colours, (width, height), interpolation=cv2.INTER_LINEAR), dtype=np.uint8
         )
     return estimate, colours
+
+
+_FG_STRIPE_ROWS = 384
+
+
+def _fb_blur_fusion(
+    image: NDArray[np.float32],
+    foreground: NDArray[np.float32],
+    background: NDArray[np.float32],
+    alpha: NDArray[np.float32],
+    size: int,
+) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """One blur-fusion step (Germer et al., 2021) with a box kernel."""
+    kernel = (size, size)
+    a = alpha[:, :, None]
+    blurred_alpha = cv2.blur(alpha, kernel)[:, :, None]
+    blurred_fg = cv2.blur(foreground * a, kernel) / (blurred_alpha + np.float32(1e-5))
+    blurred_bg = cv2.blur(background * (1 - a), kernel) / ((1 - blurred_alpha) + np.float32(1e-5))
+    estimate = blurred_fg + a * (image - a * blurred_fg - (1 - a) * blurred_bg)
+    return np.clip(estimate, 0, 1, out=estimate), blurred_bg
+
+
+def estimate_foreground(rgb: NDArray[np.uint8], alpha: NDArray[np.float32]) -> NDArray[np.uint8]:
+    """Estimate un-mixed foreground colours for an alpha matte.
+
+    Soft edge pixels contain a blend of subject and old background; compositing
+    them on a new background leaves a halo. Blur-fusion removes that background
+    contribution. Fully opaque pixels are returned untouched. Pixels that are
+    invisible once the alpha is saved as 8-bit (apart from a two-pixel ring) come
+    back black, so a transparent result no longer carries the removed background
+    in its hidden colour channels.
+
+    Runs in horizontal stripes with a halo so memory stays small on large images.
+    """
+    if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("rgb must be an H x W x 3 uint8 array")
+    if alpha.shape != rgb.shape[:2]:
+        raise ValueError("alpha must match the image size")
+    height, width = alpha.shape
+    large = max(9, min(90, round(max(height, width) * 0.03)))
+    small = max(3, round(large / 15))
+    large, small = large | 1, small | 1
+    halo = large + small
+    output = np.zeros_like(rgb)
+    solid = alpha >= 1
+    for top in range(0, height, _FG_STRIPE_ROWS):
+        bottom = min(height, top + _FG_STRIPE_ROWS)
+        start, stop = max(0, top - halo), min(height, bottom + halo)
+        window = alpha[start:stop]
+        if not np.any(window > 0):
+            continue  # nothing visible nearby: leave hidden pixels black
+        if np.all(window >= 1):
+            output[top:bottom] = rgb[top:bottom]
+            continue
+        image = rgb[start:stop].astype(np.float32) / np.float32(255)
+        a = np.ascontiguousarray(window)
+        first, background = _fb_blur_fusion(image, image, image, a, large)
+        second, _ = _fb_blur_fusion(image, first, background, a, small)
+        estimate = np.rint(second[top - start : bottom - start] * 255).astype(np.uint8)
+        output[top:bottom] = estimate
+    output[solid] = rgb[solid]
+    # Soft masks have faint tails that round to alpha 0 once saved as 8-bit. Keep
+    # estimated colours only in a thin ring around visible pixels (so naive image
+    # scalers do not pull in black fringes) and blank everything else.
+    visible = (alpha >= np.float32(0.5 / 255)).astype(np.uint8)
+    keep = cv2.dilate(visible, np.ones((5, 5), np.uint8)).astype(np.bool_)
+    output[~keep] = 0
+    return output

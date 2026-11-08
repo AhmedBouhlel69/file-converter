@@ -30,3 +30,14 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture(scope="session")
 def is_office_available():
     return _OFFICE_INSTALLED
+
+
+@pytest.fixture(autouse=True)
+def _no_libreoffice_unless_requested(request, monkeypatch):
+    """Keep Office-path tests deterministic whether or not LibreOffice is installed.
+
+    Tests that exercise the LibreOffice fallback are marked ``libreoffice``.
+    """
+    if "libreoffice" in request.keywords:
+        return
+    monkeypatch.setattr("image_converter.core.platform.libreoffice.find_soffice", lambda: None)

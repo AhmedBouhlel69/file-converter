@@ -34,7 +34,12 @@ from PySide6.QtWidgets import (
 )
 
 from image_converter.core.engine import get_file_metadata
-from image_converter.ui.components import get_compatible_output_formats, format_bytes
+from image_converter.ui.components import (
+    default_output_format,
+    file_family,
+    format_bytes,
+    get_compatible_output_formats,
+)
 from image_converter.ui.metadata_evidence import MetadataEvidence
 from image_converter.ui.theme import (
     ACCENT,
@@ -85,6 +90,26 @@ class QueueEntry:
         return " · ".join(parts)
 
 
+def make_thumbnail(pil_image: Image.Image, size) -> Image.Image:
+    """Small RGBA preview that respects EXIF rotation and high bit depth."""
+    from PIL import ImageOps
+
+    from image_converter.core.conversion.engine import _to_8bit
+
+    try:
+        pil_image.draft("RGB", (size[0] * 2, size[1] * 2))  # fast JPEG decode at reduced size
+    except Exception:
+        pass
+    try:
+        image = ImageOps.exif_transpose(pil_image) or pil_image
+    except Exception:
+        image = pil_image
+    image = _to_8bit(image) if image.mode.startswith("I") or image.mode == "F" else image
+    image = image.copy() if image is pil_image else image
+    image.thumbnail(size, Image.Resampling.LANCZOS)
+    return image.convert("RGBA")
+
+
 class AnalysisSignals(QObject):
     finished = Signal(str, object)
     failed = Signal(str, str)
@@ -126,8 +151,7 @@ class FileAnalysisTask(QRunnable):
                 height = int(meta.get("height", 0))
                 result["detail"] = f"{width}×{height}" if width and height else "Image"
                 with Image.open(self.path) as pil_image:
-                    pil_image.thumbnail((72, 72), Image.Resampling.LANCZOS)
-                    rgba = pil_image.convert("RGBA")
+                    rgba = make_thumbnail(pil_image, (72, 72))
                     raw = rgba.tobytes("raw", "RGBA")
                     image = QImage(
                         raw,
@@ -288,7 +312,7 @@ class QueueTableModel(QAbstractTableModel):
         for path in added:
             requested = (target_format or self.default_format).upper()
             compatible = get_compatible_output_formats(path)
-            selected = requested if requested in compatible else (compatible[0] if compatible else "JPG")
+            selected = requested if requested in compatible else default_output_format(path)
             entry = QueueEntry(
                 path=path,
                 target_format=selected,
@@ -330,6 +354,8 @@ class QueueTableModel(QAbstractTableModel):
         self.default_format = target_format.upper()
         for entry in self.entries:
             if self.default_format == "PER_FILE":
+                if not entry.overridden:
+                    entry.target_format = default_output_format(entry.path)
                 entry.default_format = entry.target_format
                 entry.overridden = False
                 self._estimate_entry(entry)
@@ -406,6 +432,27 @@ class QueueTableModel(QAbstractTableModel):
         for entry in self.entries[1:]:
             allowed &= set(get_compatible_output_formats(entry.path))
         return [fmt for fmt in ordered if fmt in allowed]
+
+    def is_mixed(self) -> bool:
+        """True when the queue holds different kinds of file (e.g. photos and PDFs)."""
+        if not self.entries:
+            return False
+        families = {file_family(entry.path) for entry in self.entries}
+        return len(families) > 1 or not self.compatible_format_intersection()
+
+    def natural_default(self) -> Optional[str]:
+        """Best shared target: the most common per-file default that every row supports."""
+        allowed = self.compatible_format_intersection()
+        if not allowed:
+            return None
+        votes: dict = {}
+        for entry in self.entries:
+            fmt = default_output_format(entry.path)
+            votes[fmt] = votes.get(fmt, 0) + 1
+        for fmt, _count in sorted(votes.items(), key=lambda item: -item[1]):
+            if fmt in allowed:
+                return fmt
+        return allowed[0]
 
     def has_images(self) -> bool:
         return any(entry.path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".ico", ".heic", ".heif"} for entry in self.entries)

@@ -36,6 +36,8 @@ class BackgroundRemovalWorker(QThread):
         self.tasks = list(tasks)
         self.config = config
         self._cancel_event = Event()
+        # Profile that actually ran (matters for "auto"); read after the batch finishes.
+        self.model_used: str | None = None
 
     def cancel(self) -> None:
         """Ask the service to stop safely without terminating its thread."""
@@ -69,11 +71,14 @@ class BackgroundRemovalWorker(QThread):
                 Path(task.input_path).resolve(): index for index, task in enumerate(self.tasks)
             }
             service = BackgroundRemovalService(self.config)
-            results = service.run_batch(
-                self.tasks,
-                progress_callback=on_progress,
-                cancel_check=self.is_cancelled,
-            )
+            try:
+                results = service.run_batch(
+                    self.tasks,
+                    progress_callback=on_progress,
+                    cancel_check=self.is_cancelled,
+                )
+            finally:
+                self.model_used = getattr(service, "active_model", None)
             # Retain results even if a service returns an item without a callback.
             for result in results:
                 record_result(result)

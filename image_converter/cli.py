@@ -150,6 +150,8 @@ def _run_background_removal(args: argparse.Namespace, in_path: Path) -> int:
             two_pass=args.bg_two_pass,
             save_mask=args.save_mask,
             keep_metadata=args.keep_metadata,
+            clean_edges=not args.bg_no_clean_edges,
+            accurate=args.bg_accurate,
         )
         tasks = plan_tasks(
             inputs,
@@ -284,12 +286,14 @@ def main(argv: List[str] | None = None) -> int:
     )
     background = parser.add_argument_group("Local background removal (optional Python 3.11+ module)")
     background.add_argument("--remove-background", action="store_true", help="Remove image backgrounds locally on CPU; transparent PNG by default.")
-    background.add_argument("--bg-model", choices=("fast", "balanced", "quality", "portrait"), default=None, help="Installed segmentation model (default: fast); never downloads automatically.")
+    background.add_argument("--bg-model", choices=("auto", "fast", "balanced", "quality", "portrait"), default=None, help="Installed segmentation model (default: fast). 'auto' uses Balanced when installed, otherwise Fast. Never downloads automatically.")
     background.add_argument("--bg-model-dir", default=None, help="Directory containing verified local ONNX model files.")
     background.add_argument("--save-mask", action="store_true", help="Also export the full-size grayscale mask as PNG.")
     background.add_argument("--bg-feather", type=float, default=None, help="Mask feather radius in pixels (default: 0).")
     background.add_argument("--bg-edge-shift", type=int, default=None, help="Expand (+) or contract (-) mask edges in pixels (default: 0).")
     background.add_argument("--bg-two-pass", action="store_true", help="Refine the detected subject using a second inference pass.")
+    background.add_argument("--bg-no-clean-edges", action="store_true", help="Skip halo removal at soft edges (on by default; also blanks hidden colours under transparency).")
+    background.add_argument("--bg-accurate", action="store_true", help="Average the prediction with its mirror image for steadier edges (about 2x slower).")
     background.add_argument("--bg-crop", action="store_true", help="Crop output around the detected foreground.")
     background.add_argument("--bg-padding", type=int, default=None, help="Padding around cropped foreground in pixels (default: 0).")
     background.add_argument("--bg-fill-color", type=parse_color, default=None, help="Optional solid fill for removed pixels; omit to keep transparency.")

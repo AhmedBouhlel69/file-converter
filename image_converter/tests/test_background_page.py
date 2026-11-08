@@ -67,7 +67,7 @@ def test_page_runs_async_and_retains_per_file_errors(qapp, tmp_path, monkeypatch
 
     class Service:
         def __init__(self, config):
-            assert config.model == "fast"
+            assert config.model == "auto"
             assert config.bg_color is None
 
         def run_batch(self, tasks, progress_callback, cancel_check):
